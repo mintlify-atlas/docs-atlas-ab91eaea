@@ -1,0 +1,163 @@
+---
+title: "RetryStrategy: Control Failed Message Retry Behavior"
+sidebarTitle: "RetryStrategy"
+description: "Configure whether Broccoli retries failed messages, how many attempts to allow, and when a message is permanently moved to the failed queue using the fluent builder API."
+---
+
+`RetryStrategy` configures what Broccoli does when a message handler returns an error — whether to retry the message and how many times before permanently moving it to the failed queue. Set it on the queue builder via `failed_message_retry_strategy` so the same policy applies to all topics handled by that `BroccoliQueue` instance.
+
+---
+
+## Struct Fields
+
+<ResponseField name="retry_failed" type="bool">
+  Whether failed messages should be retried at all.
+
+  - `true` — the message is re-queued and retried up to `attempts` times
+    before being moved to the failed queue.
+  - `false` — the message is moved to the failed queue immediately on the
+    first failure, with no retry attempts.
+
+  **Default:** `true`
+</ResponseField>
+
+<ResponseField name="attempts" type="Option<u8>">
+  Maximum number of processing attempts (including the initial attempt) before
+  a message is permanently moved to the failed queue. A value of `Some(3)`
+  means the message will be tried up to three times.
+
+  **Default:** `Some(3)`
+</ResponseField>
+
+---
+
+## Constructors
+
+### `RetryStrategy::new`
+
+```rust
+pub const fn new() -> Self
+```
+
+Creates a `RetryStrategy` with the default configuration: retries enabled and a maximum of 3 attempts.
+
+**Returns** `RetryStrategy`
+
+---
+
+### `RetryStrategy::default`
+
+```rust
+fn default() -> Self
+```
+
+Identical to `RetryStrategy::new()`. Provided so `Default::default()` works in contexts that require the trait — for example `.failed_message_retry_strategy(Default::default())`.
+
+**Returns** `RetryStrategy`
+
+---
+
+## Builder Methods
+
+### `.with_attempts`
+
+```rust
+pub const fn with_attempts(self, attempts: u8) -> Self
+```
+
+<ParamField path="attempts" type="u8" required>
+  Maximum number of processing attempts. Set to `1` if you want a single try
+  with no retries (but still move to the failed queue on failure), or a higher
+  number for more resilient retry behaviour.
+</ParamField>
+
+**Returns** `Self`
+
+---
+
+### `.retry_failed`
+
+```rust
+pub const fn retry_failed(self, retry_failed: bool) -> Self
+```
+
+<ParamField path="retry_failed" type="bool" required>
+  Pass `false` to disable retries entirely. Failed messages go straight to the
+  failed queue without re-queuing.
+</ParamField>
+
+**Returns** `Self`
+
+---
+
+## Usage Patterns
+
+```rust
+use broccoli_queue::queue::RetryStrategy;
+
+// Default: 3 attempts, retries enabled
+RetryStrategy::default()
+
+// Custom attempt count: up to 5 tries before the failed queue
+RetryStrategy::new().with_attempts(5)
+
+// No retries — move straight to the failed queue on first error
+RetryStrategy::new().retry_failed(false)
+```
+
+---
+
+## Configuring on the Queue Builder
+
+Pass your `RetryStrategy` to `BroccoliQueueBuilder::failed_message_retry_strategy` before calling `.build()`:
+
+```rust
+use broccoli_queue::queue::{BroccoliQueue, RetryStrategy};
+
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .failed_message_retry_strategy(RetryStrategy::new().with_attempts(5))
+    .pool_connections(10)
+    .build()
+    .await?;
+```
+
+The strategy is applied globally: all topics processed by this `BroccoliQueue` instance share the same retry configuration.
+
+---
+
+## Accessing Attempt Count in Handlers
+
+<Tip>
+  Read `msg.attempts` inside your handler to implement custom logic — such as
+  exponential backoff, alerting after the second failure, or routing to a
+  different code path on the final attempt.
+</Tip>
+
+```rust
+use broccoli_queue::brokers::broker::BrokerMessage;
+use broccoli_queue::error::BroccoliError;
+
+async fn handle_job(msg: BrokerMessage<MyPayload>) -> Result<(), BroccoliError> {
+    if msg.attempts >= 2 {
+        // Last-chance logic: alert on-call, write to audit log, etc.
+        eprintln!("Attempt {} for task {}", msg.attempts, msg.task_id);
+    }
+
+    // Introduce a backoff proportional to the attempt number.
+    let backoff = std::time::Duration::from_millis(200 * u64::from(msg.attempts + 1));
+    tokio::time::sleep(backoff).await;
+
+    process_payload(&msg.payload).await
+}
+
+queue.process_messages("jobs", Some(2), None, handle_job).await?;
+```
+
+---
+
+## Defaults Reference
+
+| Field | Default |
+|---|---|
+| `retry_failed` | `true` |
+| `attempts` | `Some(3)` |

@@ -1,0 +1,166 @@
+---
+title: "PublishOptions: Configure Message Delivery Behavior"
+sidebarTitle: "PublishOptions"
+description: "Configure how a message is delivered to the broker: set priority (1–5), TTL, a relative delay, or an absolute scheduled_at time using the fluent builder."
+---
+
+`PublishOptions` controls how a message is delivered to the broker — including its priority, how long it lives before expiry, and when it becomes visible to consumers. Pass a `PublishOptions` value as the `options` argument to [`publish`](/api/broccoli-queue#publish) or [`publish_batch`](/api/broccoli-queue#publish-batch). When `None` is passed, the broker uses its own defaults (no TTL, lowest priority, immediate delivery).
+
+---
+
+## Struct Fields
+
+The struct is constructed through `PublishOptionsBuilder` (see below), but its fields are `pub` and can be read after construction.
+
+<ResponseField name="ttl" type="Option<time::Duration>">
+  Time-to-live for the message. After this duration the broker discards the
+  message if it has not been consumed. Pass `None` to keep the message
+  indefinitely.
+</ResponseField>
+
+<ResponseField name="priority" type="Option<u8>">
+  Message priority on a scale of **1 (highest)** to **5 (lowest)**. Defaults
+  to 5 when not set. Higher-priority messages are delivered before
+  lower-priority ones when the broker supports priority queues.
+
+  <Warning>
+    Setting a priority outside the 1–5 range via the builder causes a
+    **panic** at runtime. Always validate user-supplied priority values
+    before passing them to `.priority()`.
+  </Warning>
+</ResponseField>
+
+<ResponseField name="delay" type="Option<time::Duration>">
+  A relative delay measured from the moment the message is published. The
+  message stays invisible to consumers until the delay elapses.
+</ResponseField>
+
+<ResponseField name="scheduled_at" type="Option<time::OffsetDateTime>">
+  An absolute UTC timestamp at which the message becomes visible. Use this
+  when you need to schedule delivery for a specific wall-clock time rather
+  than a duration from now.
+</ResponseField>
+
+---
+
+## Builder Pattern
+
+`PublishOptions` is constructed with `PublishOptions::builder()`, which returns a `PublishOptionsBuilder`. Every setter returns `Self`, and `.build()` finalises the value.
+
+### `PublishOptions::builder`
+
+```rust
+pub const fn builder() -> PublishOptionsBuilder
+```
+
+Returns a new `PublishOptionsBuilder` with all fields set to `None`.
+
+---
+
+### `.ttl`
+
+```rust
+pub const fn ttl(self, duration: time::Duration) -> Self
+```
+
+<ParamField path="duration" type="time::Duration" required>
+  How long the message should live in the broker before being discarded.
+</ParamField>
+
+---
+
+### `.priority`
+
+```rust
+pub fn priority(self, priority: u8) -> Self
+```
+
+<ParamField path="priority" type="u8" required>
+  Priority level between 1 (highest) and 5 (lowest). **Panics** if the value
+  is outside this range.
+</ParamField>
+
+---
+
+### `.delay`
+
+```rust
+pub const fn delay(self, duration: time::Duration) -> Self
+```
+
+<ParamField path="duration" type="time::Duration" required>
+  Relative delay before the message becomes visible to consumers, measured
+  from publish time.
+</ParamField>
+
+---
+
+### `.schedule_at`
+
+```rust
+pub const fn schedule_at(self, time: time::OffsetDateTime) -> Self
+```
+
+<ParamField path="time" type="time::OffsetDateTime" required>
+  Absolute UTC timestamp at which the message should become visible.
+</ParamField>
+
+---
+
+### `.build`
+
+```rust
+pub const fn build(self) -> PublishOptions
+```
+
+Consumes the builder and returns the final `PublishOptions` value.
+
+---
+
+## Example
+
+The snippet below demonstrates every field in a single builder chain, followed by publishing the message with high priority:
+
+```rust
+use time::{Duration, OffsetDateTime};
+use broccoli_queue::queue::PublishOptions;
+
+let opts = PublishOptions::builder()
+    .priority(1)                        // highest priority
+    .delay(Duration::seconds(60))       // visible 60 s after publish
+    .ttl(Duration::hours(24))           // discard after 24 h if unconsumed
+    .build();
+
+queue.publish("urgent-jobs", None, &payload, Some(opts)).await?;
+```
+
+To schedule at an exact wall-clock time instead of using a relative delay:
+
+```rust
+use time::{Duration, OffsetDateTime};
+use broccoli_queue::queue::PublishOptions;
+
+let run_at = OffsetDateTime::now_utc() + Duration::hours(2);
+
+let opts = PublishOptions::builder()
+    .schedule_at(run_at)
+    .ttl(Duration::hours(3))
+    .build();
+
+queue.publish("scheduled-reports", None, &payload, Some(opts)).await?;
+```
+
+---
+
+## Notes on `delay` vs `scheduled_at`
+
+<Note>
+  Both `delay` and `scheduled_at` are scheduling mechanisms. If you set both
+  on the same message, behaviour is broker-specific and may be undefined.
+  **Prefer using only one of them** per message.
+</Note>
+
+| Field | When to use |
+|---|---|
+| `delay` | You need delivery to happen *N* seconds/minutes from now. |
+| `scheduled_at` | You know the exact UTC timestamp for delivery. |

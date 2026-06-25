@@ -1,0 +1,153 @@
+---
+title: "How to Publish Messages to Broccoli Message Queues"
+sidebarTitle: "Publishing"
+description: "Publish single and batch messages to Broccoli queues using publish and publish_batch, with PublishOptions for TTL, priority, delay, and scheduled_at."
+---
+
+Broccoli provides two methods for putting messages onto a queue: `publish` for single messages and `publish_batch` for multiple. Both accept an optional `PublishOptions` struct that controls TTL, priority, delivery delay, and scheduled time. Both return a `BrokerMessage<T>` carrying the broker-assigned `task_id` UUID, which you can use to track or cancel the message later.
+
+## Single publish
+
+Use `publish` to enqueue one message at a time. The method is generic over any type `T` that implements `Clone`, `Serialize`, and `DeserializeOwned`.
+
+```rust
+pub async fn publish<T: Clone + Serialize + DeserializeOwned>(
+    &self,
+    topic: &str,
+    disambiguator: Option<String>,
+    message: &T,
+    options: Option<PublishOptions>,
+) -> Result<BrokerMessage<T>, BroccoliError>
+```
+
+**Example**
+
+```rust
+use broccoli_queue::queue::{BroccoliQueue, PublishOptions};
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Serialize, Deserialize)]
+struct JobPayload {
+    id: String,
+    task_name: String,
+}
+
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .build()
+    .await?;
+
+let payload = JobPayload {
+    id: "job-1".to_string(),
+    task_name: "process_data".to_string(),
+};
+
+let msg = queue.publish("jobs", None, &payload, None).await?;
+println!("Published: {}", msg.task_id);
+```
+
+## Batch publish
+
+Use `publish_batch` to enqueue multiple messages in a single call. It accepts any type that implements `IntoIterator<Item = T>` and returns a `Vec<BrokerMessage<T>>` — one entry per published message, preserving the original order.
+
+```rust
+pub async fn publish_batch<T: Clone + Serialize + DeserializeOwned>(
+    &self,
+    topic: &str,
+    disambiguator: Option<String>,
+    messages: impl IntoIterator<Item = T>,
+    options: Option<PublishOptions>,
+) -> Result<Vec<BrokerMessage<T>>, BroccoliError>
+```
+
+**Example**
+
+```rust
+let payloads = vec![
+    JobPayload { id: "job-1".to_string(), task_name: "process_data".to_string() },
+    JobPayload { id: "job-2".to_string(), task_name: "generate_report".to_string() },
+];
+
+let published = queue.publish_batch("jobs", None, payloads, None).await?;
+for msg in &published {
+    println!("Enqueued task_id={}", msg.task_id);
+}
+```
+
+All messages in the batch share the same `PublishOptions`. If you need per-message options (e.g., different priorities), call `publish` in a loop.
+
+## PublishOptions
+
+`PublishOptions` lets you control how and when messages become available for consumption.
+
+| Field | Type | Description |
+|---|---|---|
+| `ttl` | `Option<Duration>` | Time-to-live. The message is discarded if not consumed within this window. |
+| `priority` | `Option<u8>` | Delivery priority, **1** (highest) to **5** (lowest). Defaults to `5` when omitted. |
+| `delay` | `Option<Duration>` | Relative delay before the message becomes visible to consumers. |
+| `scheduled_at` | `Option<OffsetDateTime>` | Absolute UTC timestamp at which the message becomes visible. |
+
+Use the builder for a concise, compile-checked construction:
+
+```rust
+use broccoli_queue::queue::{BroccoliQueue, PublishOptions};
+use time::Duration;
+
+let opts = PublishOptions::builder()
+    .priority(2)
+    .delay(Duration::seconds(30))
+    .build();
+
+queue.publish("jobs", None, &payload, Some(opts)).await?;
+```
+
+Or use struct literal syntax with `..Default::default()` for partial construction:
+
+```rust
+use time::Duration;
+
+let opts = PublishOptions {
+    ttl: Some(Duration::hours(1)),
+    ..Default::default()
+};
+queue.publish("jobs", None, &payload, Some(opts)).await?;
+```
+
+## Priority
+
+Priority controls the order in which messages are dequeued. A lower numeric value means **higher** importance:
+
+- `1` — consumed first
+- `3` — mid-range
+- `5` — consumed last (default when `priority` is `None`)
+
+<Note>
+`PublishOptionsBuilder::priority` panics at runtime if the supplied value is not in the range `1..=5`. Validate user-supplied priority values before passing them to the builder.
+</Note>
+
+When multiple messages share the same priority level, the broker delivers them in FIFO order within that priority tier.
+
+## Disambiguator
+
+The optional `disambiguator` parameter routes a message into a per-producer sub-queue, enabling the fairness round-robin consumption pattern. A common choice for the disambiguator value is a tenant ID or user ID.
+
+```rust
+// Route message to the "tenant-a" sub-queue
+queue.publish("jobs", Some("tenant-a".to_string()), &payload, None).await?;
+```
+
+When `disambiguator` is `None`, the message lands in the standard queue for the topic. See the [Fairness Queues guide](/guides/fairness) for the full consumption-side setup.
+
+## Cancelling a published message
+
+If you need to remove a message before it is consumed — for example, because the underlying job was cancelled by the user — call `cancel` with the topic name and the `task_id` returned at publish time:
+
+```rust
+let msg = queue.publish("jobs", None, &payload, None).await?;
+
+// Later, if the job is cancelled before a worker picks it up:
+queue.cancel("jobs", msg.task_id.to_string()).await?;
+```
+
+<Warning>
+`cancel` removes the message from the pending queue only. If the message has already been consumed and moved to the processing queue, cancellation is a no-op and you must handle the in-flight message through your handler logic.
+</Warning>

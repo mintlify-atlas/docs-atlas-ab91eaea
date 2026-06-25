@@ -1,0 +1,122 @@
+---
+title: "Broccoli Queue Management and Runtime Status Introspection"
+sidebarTitle: "Management"
+description: "Inspect queue health with the Broccoli management feature — view pending, processing, and failed counts via queue_status, QueueStatus, and QueueType."
+---
+
+Broccoli includes an optional management API that lets you inspect queue health at runtime — checking pending, in-flight, and failed message counts without touching the underlying broker directly. The full management surface is gated behind the `management` Cargo feature flag, while the lightweight `size()` method is always available without any feature flag.
+
+## Enabling the feature
+
+Add the `management` feature alongside your broker feature in `Cargo.toml`:
+
+```toml
+[dependencies]
+broccoli_queue = { version = "0.4", features = ["redis", "management"] }
+```
+
+When the `management` feature is active, `BroccoliQueue` is backed by the `BrokerWithManagement` trait rather than the plain `Broker` trait, which extends the queue with the `queue_status` method documented below.
+
+## queue_status
+
+`queue_status` returns a point-in-time snapshot of a queue's counters. It accepts an optional `disambiguator` for inspecting a specific fairness sub-queue.
+
+```rust
+pub async fn queue_status(
+    &self,
+    queue_name: String,
+    disambiguator: Option<String>,
+) -> Result<QueueStatus, BroccoliError>
+```
+
+**Example — inspect a standard queue**
+
+```rust
+let status = queue.queue_status("jobs".to_string(), None).await?;
+
+println!(
+    "Queue '{}' — pending: {}, processing: {}, failed: {}",
+    status.name, status.size, status.processing, status.failed
+);
+```
+
+## QueueStatus fields
+
+`QueueStatus` is returned by `queue_status` and contains all counts in a single struct.
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | `String` | The name of the queue as stored in the broker. |
+| `queue_type` | `QueueType` | Indicates whether this is a `Main`, `Processing`, `Failed`, or `Fairness` queue. |
+| `size` | `usize` | Number of messages currently waiting in the main (pending) queue. |
+| `processing` | `usize` | Number of messages that have been consumed but not yet acknowledged or rejected. |
+| `failed` | `usize` | Number of messages that exhausted all retry attempts and were moved to the failed queue. |
+| `disambiguator_count` | `Option<usize>` | For fairness queues, the number of distinct active disambiguators. `None` for standard queues. |
+
+## QueueType enum
+
+The `queue_type` field describes the role of the queue entry:
+
+```rust
+pub enum QueueType {
+    /// The main pending queue — messages waiting to be consumed.
+    Main,
+    /// The in-flight processing queue — messages consumed but not yet finalised.
+    Processing,
+    /// The dead-letter queue — messages that exhausted all retry attempts.
+    Failed,
+    /// A fairness parent queue — aggregates counts across all disambiguator sub-queues.
+    Fairness,
+}
+```
+
+`QueueType` implements `Display` via `derive_more`, so you can format it directly in log messages: `format!("{}", status.queue_type)` produces `"main"`, `"processing"`, `"failed"`, or `"fairness"`.
+
+## Checking a fairness queue
+
+Pass the disambiguator to inspect a specific sub-queue:
+
+```rust
+let status = queue
+    .queue_status("jobs".to_string(), Some("tenant-a".to_string()))
+    .await?;
+
+println!(
+    "tenant-a — pending: {}, processing: {}, failed: {}",
+    status.size, status.processing, status.failed
+);
+```
+
+Call `queue_status` with `disambiguator: None` to retrieve aggregate counts across all sub-queues when the queue is used in fairness mode.
+
+## size() — always-available queue depth
+
+`size()` is available without the `management` feature flag and is the lightest-weight introspection call. It returns a `HashMap<String, u64>` mapping each queue key to its current depth.
+
+For standard queues the map contains a single entry keyed by the topic name. For fairness queues it contains one entry per active disambiguator sub-queue, each keyed by its full Redis key name (e.g. `jobs_tenant-a_queue`).
+
+```rust
+let sizes = queue.size("jobs").await?;
+
+for (name, count) in &sizes {
+    println!("{name}: {count} messages");
+}
+```
+
+**Standard queue output:**
+
+```
+jobs: 42 messages
+```
+
+**Fairness queue output:**
+
+```
+jobs_tenant-a_queue: 17 messages
+jobs_tenant-b_queue: 5 messages
+jobs_tenant-c_queue: 20 messages
+```
+
+<Tip>
+Expose `queue.size()` in your service's `/health` or `/metrics` endpoint to surface queue depth without requiring the full `management` feature. This keeps the health check dependency-light while still giving your observability stack the signal it needs to trigger autoscaling or alerting.
+</Tip>

@@ -1,0 +1,86 @@
+---
+title: "Broccoli: Async Message Queue Library for Rust"
+sidebarTitle: "Introduction"
+description: "Broccoli is a Celery-inspired async message queue for Rust with Redis, RabbitMQ, and SurrealDB backends, type-safe messages, retries, and connection pooling."
+---
+
+Broccoli is a robust, asynchronous message queue library for Rust applications — designed as a Rust-native alternative to [Celery](https://docs.celeryq.dev/en/stable/getting-started/introduction.html). If you need reliable background job processing, durable task queues, or event-driven pipelines while taking full advantage of Rust's type safety and async ecosystem, Broccoli gives you a clean, ergonomic API backed by your choice of production-grade broker: Redis (default), RabbitMQ, or SurrealDB, with more on the way.
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Async Processing" icon="bolt">
+    Built on Tokio. Every publish, consume, and worker loop is fully `async/await`, integrating naturally with the Rust async ecosystem.
+  </Card>
+  <Card title="Multiple Broker Backends" icon="server">
+    Choose Redis (default), RabbitMQ, or SurrealDB via Cargo feature flags. Switch brokers with a single URL change.
+  </Card>
+  <Card title="Type-Safe Messages" icon="shield-check">
+    All messages are wrapped in `BrokerMessage<T>` where `T: Serialize + DeserializeOwned`. Serialization errors surface at compile time, not runtime.
+  </Card>
+  <Card title="Configurable Retry Strategies" icon="rotate">
+    Per-queue `RetryStrategy` controls whether failed messages are retried and how many attempts are allowed before they are moved to the failed queue.
+  </Card>
+  <Card title="Connection Pooling" icon="database">
+    `pool_connections(n)` on the builder pre-warms a pool of broker connections, keeping throughput high under concurrent load.
+  </Card>
+  <Card title="Message Scheduling" icon="clock">
+    Publish messages with a `delay` or a `scheduled_at` timestamp. RabbitMQ scheduling requires the [delayed-exchange plugin](https://www.rabbitmq.com/blog/2015/04/16/scheduling-messages-with-rabbitmq).
+  </Card>
+  <Card title="Fairness Queues" icon="scale-balanced">
+    Use a `disambiguator` string when publishing and enable `ConsumeOptions::fairness` to route work evenly across logical groups of jobs.
+  </Card>
+  <Card title="Batch Publish & Consume" icon="layer-group">
+    `publish_batch` and `try_consume_batch` let you move large volumes of messages with a single broker round-trip, reducing overhead dramatically.
+  </Card>
+  <Card title="Concurrent Worker Processing" icon="microchip">
+    `process_messages("topic", Some(n), ...)` spawns `n` concurrent Tokio worker tasks automatically, each pulling from the same queue.
+  </Card>
+  <Card title="Management API" icon="chart-bar">
+    Enable the `management` Cargo feature to unlock `queue_status()` and `QueueStatus` — inspect queue depth and processing state at runtime.
+  </Card>
+</CardGroup>
+
+## How It Works
+
+Broccoli follows a classic producer → broker → consumer model. A **publisher** serialises any `Serialize` value into a `BrokerMessage<T>` and sends it to a named **topic** (queue) on the broker. The broker persists the message until a **consumer** is ready. The consumer's `process_messages` loop continuously pulls messages, dispatches each one to your async handler, and automatically acknowledges it on success or rejects (and optionally retries) it on failure. The broker, connection pool, and retry logic are entirely managed by Broccoli — your application code only deals with strongly-typed Rust structs.
+
+```
+┌─────────────┐        publish()        ┌─────────────┐       consume()      ┌─────────────┐
+│  Publisher  │ ──────────────────────► │   Broker    │ ───────────────────► │  Consumer   │
+│             │   BrokerMessage<T>      │ (Redis, etc)│   BrokerMessage<T>   │  handler()  │
+└─────────────┘                         └─────────────┘                      └─────────────┘
+                                               │                                    │
+                                               │◄─── acknowledge / reject ──────────┘
+```
+
+Failed messages that exhaust their retry budget are moved to a dead-letter queue named `{topic}:failed`, where they can be inspected or replayed later.
+
+## Roadmap
+
+Broccoli is actively developed. Here is where each capability stands today:
+
+| Feature | Status |
+|---|---|
+| Redis broker | ✅ Production-ready (default) |
+| RabbitMQ broker | ✅ Supported |
+| SurrealDB broker | ✅ Supported |
+| Kafka broker | 🔜 Planned |
+| Proc macros for worker definitions | 🔜 Planned |
+| Web monitoring interface | 🔜 Planned |
+| Enhanced metrics & tracing | 🔜 Planned |
+
+<Note>
+  Broccoli is MIT-licensed and welcomes contributions — especially new broker implementations, additional message patterns, and performance improvements.
+</Note>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build a working producer and consumer in minutes with a live Redis example.
+  </Card>
+  <Card title="Installation" icon="box" href="/installation">
+    Add `broccoli_queue` to your project and choose the right feature flags.
+  </Card>
+</CardGroup>

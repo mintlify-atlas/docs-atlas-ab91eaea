@@ -1,0 +1,114 @@
+---
+title: "Installing Broccoli Queue in Your Rust Project"
+sidebarTitle: "Installation"
+description: "Add broccoli_queue to Cargo.toml, pick your broker feature flags (Redis, RabbitMQ, SurrealDB), and meet the edition 2021 Rust requirement in minutes."
+---
+
+Broccoli is published to [crates.io](https://crates.io/crates/broccoli_queue) as `broccoli_queue`. You install it through Cargo like any other Rust crate — add one line to `[dependencies]`, choose a broker feature flag, and you're ready to start publishing and consuming messages.
+
+## Basic Installation
+
+The default feature set enables the Redis broker. For most projects, a single entry in `Cargo.toml` is all you need:
+
+```toml Cargo.toml
+[dependencies]
+broccoli_queue = "0.4"
+```
+
+Because the `redis` feature is included by default, this is equivalent to:
+
+```toml Cargo.toml
+[dependencies]
+broccoli_queue = { version = "0.4", features = ["redis"] }
+```
+
+## Feature Flags
+
+Broccoli uses Cargo feature flags to keep optional broker dependencies out of builds that don't need them. The table below lists every available flag:
+
+| Feature | Default | Description |
+|---|---|---|
+| `redis` | ✅ Yes | Redis broker via `bb8-redis` and `redis` (tokio-rustls) |
+| `rabbitmq` | No | RabbitMQ broker via `lapin` and `deadpool-lapin` |
+| `surrealdb` | No | SurrealDB broker via `surrealdb` (includes `kv-mem`) |
+| `management` | No | Adds `queue_status()` method and `QueueStatus` type; requires `derive_more` |
+| `test-fairness` | No | Internal flag used to test fairness-queue behaviour; not intended for application use |
+
+<Warning>
+  You **must** enable at least one of `redis`, `rabbitmq`, or `surrealdb`. If none is enabled the crate emits a `compile_error!` at build time:
+
+  ```
+  error: You must enable at least one of the following features: redis, rabbitmq, surrealdb
+  ```
+</Warning>
+
+## Feature Combinations
+
+Below are ready-to-copy `Cargo.toml` snippets for the most common configurations.
+
+<CodeGroup>
+  ```toml Redis only (default)
+  [dependencies]
+  broccoli_queue = { version = "0.4", features = ["redis"] }
+  tokio           = { version = "1",   features = ["full"] }
+  serde           = { version = "1",   features = ["derive"] }
+  ```
+
+  ```toml RabbitMQ only
+  [dependencies]
+  broccoli_queue = { version = "0.4", default-features = false, features = ["rabbitmq"] }
+  tokio           = { version = "1",   features = ["full"] }
+  serde           = { version = "1",   features = ["derive"] }
+  ```
+
+  ```toml SurrealDB only
+  [dependencies]
+  broccoli_queue = { version = "0.4", default-features = false, features = ["surrealdb"] }
+  tokio           = { version = "1",   features = ["full"] }
+  serde           = { version = "1",   features = ["derive"] }
+  ```
+
+  ```toml All backends + management API
+  [dependencies]
+  broccoli_queue = { version = "0.4", features = ["redis", "rabbitmq", "surrealdb", "management"] }
+  tokio           = { version = "1",   features = ["full"] }
+  serde           = { version = "1",   features = ["derive"] }
+  ```
+</CodeGroup>
+
+<Note>
+  When selecting RabbitMQ or SurrealDB as your **only** backend, remember to set `default-features = false` so that the `redis` crate (included by default) is not compiled into your binary unnecessarily.
+</Note>
+
+## Key Dependencies
+
+Broccoli pulls in the following major transitive dependencies, which you may also want to reference directly in your application code:
+
+| Crate | Purpose |
+|---|---|
+| `tokio` | Async runtime — Broccoli requires `features = ["full"]` in your own dep |
+| `serde` | Message serialisation / deserialisation framework |
+| `uuid` | Auto-generates `task_id` UUIDs for each `BrokerMessage<T>` |
+| `async-trait` | Enables async methods on the internal `Broker` trait |
+| `time` | Used for `PublishOptions::delay`, `ttl`, and `scheduled_at` fields |
+| `chrono` | Recommended for `DateTime<Utc>` fields in your own message types |
+
+You do not need to add these to your own `Cargo.toml` unless you use them directly in your application code — Cargo resolves them transitively.
+
+## Minimum Rust Version
+
+Broccoli uses Rust **edition 2021** and relies on stable-channel features only. No specific Minimum Supported Rust Version (MSRV) is pinned in `Cargo.toml`, so the recommendation is to use the **latest stable** Rust release. You can update to the latest stable with:
+
+```bash
+rustup update stable
+```
+
+<Note>
+  **SurrealDB in-memory mode for tests:** The `surrealdb` feature in Broccoli is compiled with `features = ["kv-mem"]` already enabled inside the crate itself, so you can use `surrealdb::engine::any::Any` with a `mem://` connection in your integration tests without adding any extra SurrealDB feature flags to your own `Cargo.toml`.
+
+  If you add `surrealdb` as a **direct** dependency for other reasons, make sure to enable `kv-mem` explicitly:
+
+  ```toml
+  surrealdb = { version = "2", features = ["kv-mem"] }
+  ```
+</Note>

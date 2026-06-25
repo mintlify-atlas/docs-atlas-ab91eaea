@@ -1,0 +1,205 @@
+---
+title: "ConsumeOptions: Configure Message Consumption Behavior"
+sidebarTitle: "ConsumeOptions"
+description: "Control how messages are fetched and processed: auto_ack, fairness round-robin, consume_wait for graceful shutdown, and handler_ack delegation to external actors."
+---
+
+`ConsumeOptions` customizes how messages are fetched and processed by the broker. Pass it to any consume method — `consume`, `try_consume`, `consume_batch`, `try_consume_batch` — or to the worker loop helpers `process_messages` and `process_messages_with_handlers`. When `None` is passed, sensible defaults are applied: no auto-acknowledgement, no fairness mode, no polling delay, and automatic acknowledgement after a successful handler.
+
+---
+
+## Struct Fields
+
+<ResponseField name="auto_ack" type="Option<bool>">
+  When `true`, messages are automatically acknowledged by the broker at the
+  moment they are consumed. This is useful for fire-and-forget workloads where
+  you do not need delivery guarantees after consumption.
+
+  **Default:** `Some(false)`.
+
+  <Warning>
+    If you call `acknowledge` or `reject` on a message that was consumed with
+    `auto_ack: true`, the broker will return an error. The message has already
+    been removed from the processing queue.
+  </Warning>
+</ResponseField>
+
+<ResponseField name="fairness" type="Option<bool>">
+  When `true`, the consumer reads from per-disambiguator sub-queues in
+  round-robin order rather than consuming from the main queue directly. This
+  prevents any single producer from starving others.
+
+  **Default:** `None` (treated as `false`).
+
+  <Note>
+    Fairness mode is primarily supported by the **Redis** broker. Behaviour
+    may vary for other broker implementations.
+  </Note>
+</ResponseField>
+
+<ResponseField name="consume_wait" type="Option<std::time::Duration>">
+  Sleep duration inserted between iterations of the tight polling loop inside
+  `consume`, `process_messages`, and related methods. Setting this to a small
+  non-zero value (e.g. 10 ms) gives the Tokio runtime a chance to process
+  cancellation signals, making spawned worker tasks interruptible.
+
+  **Default:** `None` (treated as `std::time::Duration::ZERO` — no sleep).
+
+  <Tip>
+    Always set `consume_wait` to at least a few milliseconds when you run
+    `process_messages` inside `tokio::spawn`. Without it, Tokio cannot abort
+    the task because it never yields.
+  </Tip>
+</ResponseField>
+
+<ResponseField name="handler_ack" type="Option<bool>">
+  When `true` (the default), `process_messages` and
+  `process_messages_with_handlers` automatically call `acknowledge` after the
+  handler returns `Ok`. Set to `false` to skip that automatic acknowledgement
+  and delegate it to another actor.
+
+  **Default:** `Some(true)`.
+
+  <Note>
+    Handlers returning an `Err` **always** trigger a `reject`, regardless of
+    the `handler_ack` setting.
+  </Note>
+</ResponseField>
+
+---
+
+## Builder Pattern
+
+`ConsumeOptions` is constructed with `ConsumeOptions::builder()`, which returns a `ConsumeOptionsBuilder`. Every setter returns `Self` and `.build()` finalises the value.
+
+### `ConsumeOptions::builder`
+
+```rust
+pub const fn builder() -> ConsumeOptionsBuilder
+```
+
+Returns a new `ConsumeOptionsBuilder` with all fields set to `None`.
+
+---
+
+### `.auto_ack`
+
+```rust
+pub const fn auto_ack(self, auto_ack: bool) -> Self
+```
+
+<ParamField path="auto_ack" type="bool" required>
+  `true` to automatically acknowledge messages on consumption.
+</ParamField>
+
+---
+
+### `.fairness`
+
+```rust
+pub const fn fairness(self, fairness: bool) -> Self
+```
+
+<ParamField path="fairness" type="bool" required>
+  `true` to consume from per-disambiguator sub-queues in round-robin order.
+</ParamField>
+
+---
+
+### `.consume_wait`
+
+```rust
+pub const fn consume_wait(self, consume_wait: std::time::Duration) -> Self
+```
+
+<ParamField path="consume_wait" type="std::time::Duration" required>
+  How long to sleep between polling iterations. Set to
+  `Duration::from_millis(10)` or similar to keep worker tasks interruptible.
+</ParamField>
+
+---
+
+### `.handler_ack`
+
+```rust
+pub const fn handler_ack(self, followup: bool) -> Self
+```
+
+<ParamField path="followup" type="bool" required>
+  `false` to skip the automatic `acknowledge` call after a successful handler.
+  Responsibility for acknowledging is then delegated to another actor.
+</ParamField>
+
+---
+
+### `.build`
+
+```rust
+pub const fn build(self) -> ConsumeOptions
+```
+
+Consumes the builder and returns the final `ConsumeOptions` value.
+
+---
+
+## Examples
+
+### Fairness mode with graceful shutdown support
+
+```rust
+use broccoli_queue::queue::ConsumeOptions;
+
+let opts = ConsumeOptions::builder()
+    .fairness(true)
+    .consume_wait(std::time::Duration::from_millis(10))
+    .build();
+
+queue.process_messages("jobs", Some(4), Some(opts), handler).await?;
+```
+
+### Auto-acknowledge (fire-and-forget)
+
+```rust
+use broccoli_queue::queue::ConsumeOptions;
+
+let opts = ConsumeOptions::builder()
+    .auto_ack(true)
+    .build();
+
+// Messages are removed from the queue the moment they are consumed.
+let msg = queue.consume::<MyPayload>("events", Some(opts)).await?;
+// Do NOT call queue.acknowledge() — it would return an error.
+```
+
+### Delegate acknowledgement to an external actor
+
+```rust
+use broccoli_queue::queue::ConsumeOptions;
+
+let opts = ConsumeOptions::builder()
+    .handler_ack(false)
+    .consume_wait(std::time::Duration::from_millis(10))
+    .build();
+
+queue.process_messages("jobs", Some(2), Some(opts), |msg| async move {
+    // Spawn a long-running task and return immediately.
+    // The message stays in the processing queue until a reaper acknowledges it.
+    tokio::spawn(async move {
+        do_long_work(&msg.payload).await;
+        // A separate reaper process calls queue.acknowledge() here.
+    });
+    Ok(())
+}).await?;
+```
+
+---
+
+## Note on `handler_ack: false`
+
+<Note>
+  Use `handler_ack(false)` when your handler spawns a long-running background
+  task and returns immediately. The message will stay in the "processing" state
+  until an external process — such as a dedicated reaper — explicitly calls
+  `acknowledge`. This pattern ensures the message is not lost if the worker
+  process crashes before the background task completes.
+</Note>

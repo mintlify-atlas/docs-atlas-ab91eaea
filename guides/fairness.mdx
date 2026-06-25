@@ -1,0 +1,111 @@
+---
+title: "Fairness Queues: Balanced Multi-Tenant Message Processing"
+sidebarTitle: "Fairness Queues"
+description: "Broccoli fairness queues use a disambiguator to create per-producer sub-queues, then round-robin across them so high-volume producers cannot starve others."
+---
+
+In a standard queue, a single high-volume producer can flood the topic and starve lower-volume producers — a common problem in multi-tenant systems where one busy tenant crowds out all others. Broccoli's fairness queue feature solves this by using a `disambiguator` field to route messages into per-producer sub-queues and then round-robining consumption across all of them, so every producer gets a proportionally fair share of consumer throughput.
+
+## How fairness works
+
+The fairness mechanism is built on two complementary conventions:
+
+1. **Publish with a disambiguator.** When you call `publish` or `publish_batch` with a non-`None` `disambiguator`, the broker routes the message to a sub-queue named `{topic}_{disambiguator}_queue` instead of the shared topic queue.
+
+2. **Consume with `fairness: true`.** When a consumer sets `ConsumeOptions::fairness` to `true`, the Redis broker maintains a round-robin index across all registered disambiguator sub-queues for that topic. Each consume call picks the next sub-queue in rotation, takes one message from it, and advances the pointer — ensuring no single producer dominates.
+
+The Redis broker tracks active sub-queues in two auxiliary keys:
+- `{topic}_fairness_set` — a set of all known disambiguator values for the topic
+- `{topic}_fairness_round_robin` — a list used as the rotation cursor
+
+## Publishing with a disambiguator
+
+Pass the producer identifier (e.g. a tenant ID, user ID, or job group) as the second argument to `publish`:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+
+// Routed to "jobs_tenant-a_queue"
+queue.publish("jobs", Some("tenant-a".to_string()), &payload, None).await?;
+
+// Routed to "jobs_tenant-b_queue"
+queue.publish("jobs", Some("tenant-b".to_string()), &payload, None).await?;
+```
+
+Any serialisable payload type works; the disambiguator is metadata only and does not affect message content. After publish, `BrokerMessage::disambiguator` on the returned value will reflect the string you passed.
+
+## Consuming with fairness
+
+Enable fairness on the consume side by setting `fairness(true)` in `ConsumeOptions`, then pass those options to `process_messages` or any manual consume call:
+
+```rust
+use broccoli_queue::queue::{BroccoliQueue, ConsumeOptions};
+use broccoli_queue::brokers::broker::BrokerMessage;
+
+let opts = ConsumeOptions::builder().fairness(true).build();
+
+queue.process_messages(
+    "jobs",
+    Some(4),
+    Some(opts),
+    |msg: BrokerMessage<JobPayload>| async move {
+        println!("From producer: {:?}", msg.disambiguator);
+        process_job(msg.payload).await
+    },
+).await?;
+```
+
+The round-robin from the integration test confirms the ordering: given three producers each with two messages, consumption order is `job-1 → job-2 → job-3 → job-1 → job-2 → job-3`.
+
+## Queue naming convention
+
+Knowing the exact key names is important for manual acknowledge/reject calls and for monitoring.
+
+| Purpose | Key pattern |
+|---|---|
+| Pending messages | `{topic}_{disambiguator}_queue` |
+| In-flight (processing) | `{topic}_{disambiguator}_processing` |
+| Failed messages | `{topic}_{disambiguator}_failed` |
+| All disambiguators | `{topic}_fairness_set` |
+| Round-robin cursor | `{topic}_fairness_round_robin` |
+
+When calling `acknowledge` or `reject` after a manual consume from a fairness sub-queue, you must pass the full sub-queue name as the `topic` argument:
+
+```rust
+// Message was consumed from the "tenant-a" sub-queue
+queue
+    .acknowledge("jobs_tenant-a_queue", msg)
+    .await?;
+```
+
+<Note>
+When using `process_messages` with `fairness: true`, Broccoli handles the sub-queue name internally — you only need to pass the root topic name (`"jobs"`). The sub-queue name matters only for manual low-level consume flows.
+</Note>
+
+## Backend support
+
+<Note>
+Fairness queues are a **Redis-only** feature. The `ConsumeOptions::fairness` field is read by the Redis broker; other backends (RabbitMQ, SurrealDB) ignore it and consume from the standard queue. To run the fairness-specific integration test suite, enable the `test-fairness` Cargo feature:
+
+```toml
+[dev-dependencies]
+broccoli_queue = { version = "0.4", features = ["redis", "test-fairness"] }
+```
+</Note>
+
+## Use cases
+
+<CardGroup cols={2}>
+  <Card title="Multi-tenant SaaS" icon="building">
+    Route each customer's jobs to their own sub-queue so a single large customer cannot delay processing for all other tenants.
+  </Card>
+  <Card title="Per-user job isolation" icon="user">
+    Assign one sub-queue per user so every user's background tasks receive equal attention regardless of how many tasks they submit.
+  </Card>
+  <Card title="Priority producers" icon="arrow-up">
+    Combine disambiguators with `PublishOptions::priority` to give individual producers both fairness across producers and message-level priority within their own sub-queue.
+  </Card>
+  <Card title="Rate limiting per source" icon="gauge">
+    Implement token-bucket or leaky-bucket rate limits upstream of publish, then use fairness on the consume side to guarantee fair drain order between sources.
+  </Card>
+</CardGroup>

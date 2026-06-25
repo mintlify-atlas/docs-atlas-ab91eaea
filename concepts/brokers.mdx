@@ -1,0 +1,145 @@
+---
+title: "Broker Backends: Redis, RabbitMQ, and SurrealDB Compared"
+sidebarTitle: "Brokers"
+description: "Broccoli supports Redis, RabbitMQ, and SurrealDB backends chosen by URL scheme. All share the same Broker trait for publish, consume, ack, and reject."
+---
+
+Broccoli abstracts over message brokers through the `Broker` trait. The specific implementation is selected automatically based on the connection URL scheme when you call `BroccoliQueue::builder(url)` — no manual wiring required. Each backend provides the same publishing, consuming, acknowledgment, and rejection semantics, letting you switch brokers by changing a single connection string.
+
+## URL-Based Broker Selection
+
+Pass a URL to `BroccoliQueue::builder` and Broccoli inspects the scheme prefix to choose the right backend at connection time:
+
+| URL Scheme | Broker | Cargo Feature Flag |
+|---|---|---|
+| `redis://...` or `rediss://...` | Redis | `redis` *(default)* |
+| `amqp://...` or `amqps://...` | RabbitMQ | `rabbitmq` |
+| `ws://...` or `wss://...` or `mem://...` | SurrealDB | `surrealdb` |
+
+<CodeGroup>
+```rust Redis
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .build()
+    .await?;
+```
+
+```rust RabbitMQ
+let queue = BroccoliQueue::builder("amqp://guest:guest@localhost:5672/%2f")
+    .build()
+    .await?;
+```
+
+```rust SurrealDB (in-memory)
+let queue = BroccoliQueue::builder("mem://")
+    .build()
+    .await?;
+```
+</CodeGroup>
+
+<Warning>
+  If the URL scheme does not match any enabled feature, `build()` will return a `BroccoliError::Broker("Unsupported broker URL scheme")`. Ensure the matching Cargo feature is enabled for your chosen backend.
+</Warning>
+
+## The Broker Trait
+
+All three backends implement `async_trait::async_trait Broker`. This trait defines the full contract for broker operations. The `BroccoliQueue` struct holds a `Box<dyn Broker>` wrapped in an `Arc`, so all queue operations dispatch through this interface:
+
+```rust
+#[async_trait]
+pub trait Broker: Send + Sync {
+    async fn connect(
+        &mut self,
+        broker_url: &str,
+    ) -> Result<(), BroccoliError>;
+
+    async fn publish(
+        &self,
+        queue_name: &str,
+        disambiguator: Option<String>,
+        messages: &[InternalBrokerMessage],
+        options: Option<PublishOptions>,
+    ) -> Result<Vec<InternalBrokerMessage>, BroccoliError>;
+
+    async fn consume(
+        &self,
+        queue_name: &str,
+        options: Option<ConsumeOptions>,
+    ) -> Result<InternalBrokerMessage, BroccoliError>;
+
+    async fn try_consume(
+        &self,
+        queue_name: &str,
+        options: Option<ConsumeOptions>,
+    ) -> Result<Option<InternalBrokerMessage>, BroccoliError>;
+
+    async fn acknowledge(
+        &self,
+        queue_name: &str,
+        message: InternalBrokerMessage,
+    ) -> Result<(), BroccoliError>;
+
+    async fn reject(
+        &self,
+        queue_name: &str,
+        message: InternalBrokerMessage,
+    ) -> Result<(), BroccoliError>;
+
+    async fn cancel(
+        &self,
+        queue_name: &str,
+        message_id: String,
+    ) -> Result<(), BroccoliError>;
+
+    async fn size(
+        &self,
+        queue_name: &str,
+    ) -> Result<HashMap<String, u64>, BroccoliError>;
+}
+```
+
+`try_consume_batch` also has a default implementation built on top of `try_consume`, so individual brokers only need to override it if the backend supports a more efficient batch read primitive.
+
+## BrokerConfig
+
+When you call `.build()` on the builder, it assembles a `BrokerConfig` struct and passes it to the broker constructor before connecting. These fields correspond directly to builder methods:
+
+| Field | Type | Default | Builder Method |
+|---|---|---|---|
+| `retry_attempts` | `Option<u8>` | `Some(3)` | `.failed_message_retry_strategy(...)` |
+| `retry_failed` | `Option<bool>` | `Some(true)` | `.failed_message_retry_strategy(...)` |
+| `pool_connections` | `Option<u8>` | `Some(10)` | `.pool_connections(n)` |
+| `enable_scheduling` | `Option<bool>` | `Some(false)` | `.enable_scheduling(bool)` |
+
+<Note>
+  Scheduling support varies by backend. If you enable scheduling with RabbitMQ, you must also install the [RabbitMQ delayed-exchange plugin](https://www.rabbitmq.com/blog/2015/04/16/scheduling-messages-with-rabbitmq).
+</Note>
+
+## Connection Pooling
+
+Maintaining a pool of open connections avoids the overhead of establishing a new connection for every publish or consume call.
+
+<Tabs>
+  <Tab title="Redis">
+    The Redis backend uses the **bb8** async connection pool. Pool size is set via `.pool_connections(n)` on the builder. Each `BroccoliQueue` clone shares this pool through the inner `Arc`, so you can drive high concurrency from many tasks without opening extra connections.
+  </Tab>
+  <Tab title="RabbitMQ">
+    The RabbitMQ backend uses **deadpool-lapin** for connection pooling over AMQP. The same `.pool_connections(n)` builder method controls the pool size. AMQP channel multiplexing means individual pool connections can handle multiple concurrent operations.
+  </Tab>
+  <Tab title="SurrealDB">
+    SurrealDB maintains a single connection (over WebSocket or in-memory). The `pool_connections` setting has no effect for this backend. SurrealDB is best suited to single-process, low-concurrency workloads or integration testing.
+  </Tab>
+</Tabs>
+
+## Choosing a Broker
+
+<CardGroup cols={2}>
+  <Card title="Redis" icon="bolt" href="/brokers/redis">
+    **Best for most use cases.** Redis is fast, operationally simple, and widely available in every cloud environment. If you have no existing broker infrastructure, start here.
+  </Card>
+  <Card title="RabbitMQ" icon="rabbit" href="/brokers/rabbitmq">
+    **Best for AMQP workloads.** Choose RabbitMQ when you need native AMQP routing, dead-letter exchanges, per-message TTL, or when you already operate RabbitMQ infrastructure.
+  </Card>
+  <Card title="SurrealDB" icon="flask" href="/brokers/surrealdb">
+    **Best for testing and embedded use.** The `mem://` URL gives you a fully in-process, zero-dependency queue, making it ideal for unit tests, integration tests, and local development.
+  </Card>
+</CardGroup>

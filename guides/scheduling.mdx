@@ -1,0 +1,141 @@
+---
+title: "Scheduling Delayed and Timed Messages in Broccoli Queue"
+sidebarTitle: "Scheduling"
+description: "Schedule Broccoli messages using delay or scheduled_at in PublishOptions, enable scheduling on the queue builder, and understand per-backend requirements."
+---
+
+Broccoli supports scheduling messages to be delivered at a future time — either after a fixed relative delay or at a specific absolute timestamp. Scheduling must be explicitly enabled on the queue builder and has backend-specific requirements, most notably a RabbitMQ plugin for the AMQP broker. Once enabled, the two delivery-time fields in `PublishOptions` unlock the full scheduling surface.
+
+## Enabling scheduling
+
+Pass `enable_scheduling(true)` to the `BroccoliQueue` builder before calling `.build()`:
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .enable_scheduling(true)
+    .build()
+    .await?;
+```
+
+<Warning>
+For **RabbitMQ**, scheduling requires the `rabbitmq_delayed_message_exchange` plugin to be installed and enabled on your broker. Without it, messages published with `delay` or `scheduled_at` will be delivered immediately. See the [official installation guide](https://www.rabbitmq.com/blog/2015/04/16/scheduling-messages-with-rabbitmq) for details.
+</Warning>
+
+## Delay — relative delivery time
+
+Use `PublishOptions::delay` to hold a message for a fixed duration before making it available to consumers. The delay is measured from the moment the broker receives the message.
+
+```rust
+use broccoli_queue::queue::PublishOptions;
+use time::Duration;
+
+queue.publish(
+    "jobs",
+    None,
+    &payload,
+    Some(PublishOptions {
+        delay: Some(Duration::seconds(30)),
+        ..Default::default()
+    }),
+).await?;
+```
+
+Or with the builder:
+
+```rust
+let opts = PublishOptions::builder()
+    .delay(Duration::seconds(30))
+    .build();
+
+queue.publish("jobs", None, &payload, Some(opts)).await?;
+```
+
+## Scheduled at — absolute delivery time
+
+Use `PublishOptions::scheduled_at` to publish a message that becomes visible at a specific UTC timestamp. This is useful for business logic that has a concrete deadline, such as sending a reminder at 09:00 the following morning.
+
+```rust
+use broccoli_queue::queue::PublishOptions;
+use time::OffsetDateTime;
+
+let tomorrow = OffsetDateTime::now_utc() + time::Duration::hours(24);
+
+queue.publish(
+    "jobs",
+    None,
+    &payload,
+    Some(PublishOptions {
+        scheduled_at: Some(tomorrow),
+        ..Default::default()
+    }),
+).await?;
+```
+
+Or with the builder (note the method name is `schedule_at`, not `scheduled_at`):
+
+```rust
+let opts = PublishOptions::builder()
+    .schedule_at(tomorrow)
+    .build();
+
+queue.publish("jobs", None, &payload, Some(opts)).await?;
+```
+
+## Batch scheduling example
+
+The publisher example ships with a demonstration of scheduled batch publish. Both messages below are held for 10 seconds before becoming available:
+
+```rust
+use broccoli_queue::queue::{BroccoliQueue, PublishOptions};
+use time::Duration;
+
+let jobs = vec![
+    JobPayload { id: "job-1".to_string(), task_name: "process_data".to_string(), /* … */ },
+    JobPayload { id: "job-2".to_string(), task_name: "generate_report".to_string(), /* … */ },
+];
+
+let published = queue
+    .publish_batch(
+        "jobs",
+        None,
+        jobs,
+        Some(PublishOptions {
+            delay: Some(Duration::seconds(10)),
+            ..Default::default()
+        }),
+    )
+    .await?;
+
+println!(
+    "Scheduled job IDs: {:?}",
+    published.iter().map(|j| j.task_id).collect::<Vec<_>>()
+);
+```
+
+## Combining delay and scheduled_at
+
+You can set either `delay` or `scheduled_at` on a single `PublishOptions`, but not both simultaneously. When both are present, behaviour is broker-dependent — in practice the last-evaluated field wins. Keep your code explicit by setting only one scheduling field per message.
+
+<Note>
+Both `delay` and `scheduled_at` are ignored (message is delivered immediately) unless `enable_scheduling(true)` was passed to the builder.
+</Note>
+
+## Backend notes
+
+<Tabs>
+  <Tab title="Redis">
+    Messages are stored in a sorted set with a Unix nanosecond timestamp as the score. A scheduler loop inside the Redis broker implementation periodically scans the set and moves due messages into the main FIFO queue, where they become visible to consumers. No external daemon is required.
+
+    Delayed messages obey the standard priority system — once promoted to the main queue, a higher-priority message published later can still be consumed before the promoted message if its score is lower.
+  </Tab>
+  <Tab title="RabbitMQ">
+    Scheduling relies on the `rabbitmq_delayed_message_exchange` plugin. Messages are published to a special delayed exchange that holds them inside the broker until their delivery time. When the scheduled time arrives, RabbitMQ routes them to the target queue automatically.
+
+    Without the plugin, Broccoli falls back to immediate delivery. Ensure the plugin is installed **before** enabling scheduling on your queue builder.
+  </Tab>
+  <Tab title="SurrealDB">
+    The SurrealDB broker uses timestamp-based filtering at consume time. When a consumer calls `consume` or `try_consume`, the query filters out records whose `scheduled_at` value is still in the future. No background promotion loop is needed — messages simply become eligible once the wall clock passes their scheduled timestamp.
+  </Tab>
+</Tabs>

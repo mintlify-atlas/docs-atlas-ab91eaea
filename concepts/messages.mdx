@@ -1,0 +1,139 @@
+---
+title: "BrokerMessage: Type-Safe Message Envelopes in Broccoli"
+sidebarTitle: "Messages"
+description: "BrokerMessage<T> wraps your typed payload alongside a UUID task_id, attempt counter, and optional disambiguator for fairness routing in Broccoli queues."
+---
+
+Every message in Broccoli is wrapped in a `BrokerMessage<T>` envelope. This generic struct carries your typed payload alongside queue metadata — a unique identifier, an attempt counter, and an optional disambiguator — giving handlers full context about a message without any manual bookkeeping.
+
+## BrokerMessage&lt;T&gt; Fields
+
+The struct is defined in `broccoli_queue::brokers::broker` and derives `Debug`, `Clone`, `Serialize`, and `Deserialize`:
+
+| Field | Type | Description |
+|---|---|---|
+| `task_id` | `uuid::Uuid` | A UUID v4 generated at publish time. Uniquely identifies each message across all queues. |
+| `payload` | `T` | Your application-defined payload. Must implement `Clone + Serialize + DeserializeOwned`. |
+| `attempts` | `u8` | The number of processing attempts made so far. Starts at `0` and is incremented each time a message is rejected and requeued. |
+| `disambiguator` | `Option<String>` | An optional string used for fairness-queue routing. Messages with the same disambiguator are grouped into the same sub-queue. |
+
+<Note>
+  `task_id` is assigned by Broccoli at publish time — you never set it manually. Use it for logging, deduplication, or tracing a message through your system.
+</Note>
+
+## Creating Messages
+
+Messages are created implicitly when you call `publish` or `publish_batch`. Internally, Broccoli constructs a `BrokerMessage::new(payload, disambiguator)` which generates the UUID, sets `attempts` to `0`, and wraps the payload. The returned value gives you access to the assigned `task_id`.
+
+```rust
+let published: BrokerMessage<MyPayload> = queue
+    .publish("jobs", None, &payload, None)
+    .await?;
+
+println!("Published task_id: {}", published.task_id);
+```
+
+To publish with a disambiguator (for fairness routing):
+
+```rust
+let published = queue
+    .publish("jobs", Some("tenant-42".to_string()), &payload, None)
+    .await?;
+```
+
+## Reading Message Metadata in Handlers
+
+When using `process_messages`, your handler receives a fully typed `BrokerMessage<T>`. You can inspect `task_id` and `attempts` alongside the payload to implement logging, alerting, or custom retry logic.
+
+```rust
+queue.process_messages(
+    "jobs",
+    None,
+    None,
+    |msg: BrokerMessage<JobPayload>| async move {
+        println!("task_id: {}, attempts: {}", msg.task_id, msg.attempts);
+
+        if msg.attempts > 2 {
+            eprintln!("Too many retries for job {}", msg.payload.id);
+        }
+
+        Ok(())
+    },
+).await?;
+```
+
+<Tip>
+  The `attempts` field is your built-in retry counter. You can use it to implement exponential backoff sleeps, dead-letter alerting, or conditional logic without any external state.
+</Tip>
+
+## Serialization
+
+Messages are serialized to JSON internally using `serde_json`. The payload type `T` must implement both `serde::Serialize` and `serde::de::DeserializeOwned`. The simplest way to satisfy this requirement is to derive both traits along with `Clone`:
+
+```rust
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct JobPayload {
+    id: String,
+    task_name: String,
+}
+```
+
+<Tabs>
+  <Tab title="Simple Payload">
+    ```rust
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    struct EmailJob {
+        recipient: String,
+        subject: String,
+        body: String,
+    }
+    ```
+  </Tab>
+  <Tab title="Nested Payload">
+    ```rust
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    struct ReportJob {
+        report_id: uuid::Uuid,
+        filters: ReportFilters,
+        requested_by: String,
+    }
+
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    struct ReportFilters {
+        start_date: String,
+        end_date: String,
+        categories: Vec<String>,
+    }
+    ```
+  </Tab>
+  <Tab title="Enum Payload">
+    ```rust
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    enum WorkerTask {
+        SendEmail { recipient: String },
+        GenerateReport { report_id: String },
+        CleanupData { older_than_days: u32 },
+    }
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+  If your payload type does not implement `serde::Serialize` or `serde::de::DeserializeOwned`, the call to `publish` or `consume` will not compile. The constraint is enforced at the generic boundary, giving you a clear compile-time error.
+</Warning>
+
+## InternalBrokerMessage
+
+At the broker layer, Broccoli uses a companion struct called `InternalBrokerMessage`. It holds the same fields as `BrokerMessage<T>` but stores `task_id` as a `String` and `payload` as a JSON-serialized `String`. This representation is what gets written to Redis, RabbitMQ, or SurrealDB.
+
+Conversion between `BrokerMessage<T>` and `InternalBrokerMessage` is handled automatically through `From` and `into_message()` implementations. As a caller, you never interact with `InternalBrokerMessage` directly — all public APIs on `BroccoliQueue` work with the typed `BrokerMessage<T>`.
+
+<CardGroup cols={2}>
+  <Card title="Queue" icon="layer-group" href="/concepts/queue">
+    Learn about the BroccoliQueue struct and its full set of publishing and consuming operations.
+  </Card>
+  <Card title="Retry Strategy" icon="arrow-rotate-right" href="/concepts/retry-strategy">
+    See how the attempts counter interacts with retry configuration to route failed messages.
+  </Card>
+</CardGroup>

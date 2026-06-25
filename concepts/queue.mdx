@@ -1,0 +1,119 @@
+---
+title: "Understanding the BroccoliQueue: Core API Concepts"
+sidebarTitle: "Queue"
+description: "BroccoliQueue is Broccoli's central API struct. It wraps a broker behind an Arc<Box<dyn Broker>>, making it cheaply cloneable across async tasks."
+---
+
+`BroccoliQueue` is the central struct in Broccoli. It wraps a broker implementation behind an `Arc<Box<dyn Broker>>` so it can be cheaply cloned and shared across async tasks without duplicating connection pool resources. Every interaction with a queue — publishing, consuming, acknowledging, or inspecting — goes through this single type.
+
+## Builder Pattern
+
+`BroccoliQueue` is always constructed through its builder. Call `BroccoliQueue::builder(url)` with a broker connection URL to receive a `BroccoliQueueBuilder`, then chain configuration methods before calling the async `.build()` method to establish the broker connection.
+
+```rust
+let queue = BroccoliQueue::builder("redis://localhost:6379")
+    .pool_connections(5)
+    .failed_message_retry_strategy(RetryStrategy::new().with_attempts(3))
+    .enable_scheduling(false)
+    .build()
+    .await?;
+```
+
+<Note>
+  The `.build()` call is `async` — it establishes the underlying broker connection and initializes the connection pool before returning.
+</Note>
+
+The builder exposes these configuration methods:
+
+| Method | Description | Default |
+|---|---|---|
+| `.pool_connections(n)` | Size of the broker connection pool | `10` |
+| `.failed_message_retry_strategy(s)` | Controls retry behaviour on handler errors | 3 attempts, retry enabled |
+| `.enable_scheduling(bool)` | Enables delayed/scheduled message publishing | `false` |
+
+## Cloning
+
+`BroccoliQueue` implements `Clone`. Crucially, a clone does **not** open new broker connections — it increments the reference count on the shared `Arc` so all clones share the same underlying connection pool. This is the idiomatic pattern for distributing a queue handle across Tokio tasks.
+
+```rust
+let queue2 = queue.clone();
+tokio::spawn(async move {
+    queue2.publish("jobs", None, &job, None).await
+});
+```
+
+<Tip>
+  Create one `BroccoliQueue` at application startup, then `.clone()` it freely into every service, route handler, or worker task that needs queue access.
+</Tip>
+
+## Operations Overview
+
+`BroccoliQueue` exposes a complete set of messaging operations:
+
+- **`publish`** — Publishes a single typed message to a topic and returns the stored `BrokerMessage<T>` (including its generated `task_id`).
+- **`publish_batch`** — Publishes an iterator of messages to a topic in a single broker call, returning the full list of stored messages.
+- **`consume`** — Blocking consume: waits until a message is available on the topic, then returns it and moves it to the processing queue.
+- **`consume_batch`** — Blocking batch consume: waits until `batch_size` messages have been collected or a `timeout` elapses.
+- **`try_consume`** — Non-blocking consume: returns `Ok(None)` immediately if no message is available.
+- **`try_consume_batch`** — Non-blocking batch consume: returns however many messages are immediately available, up to `batch_size`.
+- **`acknowledge`** — Removes a successfully processed message from the processing queue.
+- **`reject`** — Marks a message as failed; Broccoli either requeues it for retry or moves it to the failed queue depending on the configured `RetryStrategy`.
+- **`cancel`** — Deletes a message by its `task_id` regardless of its current queue position.
+- **`size`** — Returns a `HashMap<String, u64>` mapping queue names to their current depth, including fairness sub-queues.
+- **`process_messages`** — High-level consumer loop: consumes messages in a loop and dispatches each to an async handler closure, handling ack/reject automatically.
+- **`process_messages_with_handlers`** — Like `process_messages` but accepts separate `on_success` and `on_error` callbacks in addition to the main handler.
+- **`queue_status`** — *(management feature only)* Returns structured status information for a queue.
+
+## Queue Lifecycle
+
+Understanding how a message travels through the system helps reason about failures and retries.
+
+<Steps>
+  <Step title="Publish">
+    A caller invokes `queue.publish("jobs", ...)`. Broccoli serializes the payload to JSON, wraps it in a `BrokerMessage`, and writes it to the **main queue** for the topic (e.g., `jobs`).
+  </Step>
+  <Step title="Consume">
+    A worker calls `queue.consume("jobs", ...)` (or `process_messages`). Broccoli atomically moves the message from the main queue into a **processing queue** (e.g., `jobs_processing`) and returns it to the caller.
+  </Step>
+  <Step title="Acknowledge">
+    If the handler returns `Ok(())`, Broccoli calls `acknowledge`, which removes the message from the processing queue. The message is gone.
+  </Step>
+  <Step title="Reject">
+    If the handler returns `Err(...)`, Broccoli calls `reject`. The attempt counter is incremented. If the message has remaining retries, it is moved back to the main queue; otherwise it is moved to the **failed queue** (e.g., `jobs_failed`).
+  </Step>
+</Steps>
+
+## The Management Feature
+
+The `queue_status` method is only compiled in when the `management` Cargo feature is enabled. It returns a `QueueStatus` value describing the depth, processing count, and failed count for a given queue and optional disambiguator.
+
+<CodeGroup>
+```toml Cargo.toml
+broccoli_queue = { version = "0.4", features = ["redis", "management"] }
+```
+
+```rust Usage
+#[cfg(feature = "management")]
+let status = queue
+    .queue_status("jobs".to_string(), None)
+    .await?;
+
+println!("Queued: {}, Failed: {}", status.queued, status.failed);
+```
+</CodeGroup>
+
+<Warning>
+  Without the `management` feature, the `queue_status` method does not exist on `BroccoliQueue`. Attempting to call it will produce a compile error.
+</Warning>
+
+<CardGroup cols={2}>
+  <Card title="Messages" icon="envelope" href="/concepts/messages">
+    Learn about the BrokerMessage envelope, its fields, and serialization requirements.
+  </Card>
+  <Card title="Brokers" icon="database" href="/concepts/brokers">
+    Explore the Redis, RabbitMQ, and SurrealDB backend implementations.
+  </Card>
+  <Card title="Retry Strategy" icon="arrow-rotate-right" href="/concepts/retry-strategy">
+    Configure how failed messages are retried and routed to the failed queue.
+  </Card>
+</CardGroup>

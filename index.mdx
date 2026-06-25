@@ -1,20 +1,90 @@
 ---
-title: "Introduction"
-description: "Welcome to your project"
+title: "Broccoli: Async Message Queue for Rust"
+sidebarTitle: "Home"
+description: "Broccoli is a type-safe, async-first Rust message queue library backed by Redis, RabbitMQ, or SurrealDB — the Rust alternative to Celery."
 ---
 
-Write a short description of your product here. What it does, who it's for, and what they can accomplish with it.
+Broccoli is a robust message queue library for Rust applications. It provides a unified, ergonomic API for publishing and consuming messages across multiple broker backends — currently Redis, RabbitMQ, and SurrealDB — with full async/await support via Tokio.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Publish and consume your first message in under five minutes.
+  </Card>
+  <Card title="Installation" icon="download" href="/installation">
+    Add Broccoli to your Cargo.toml with the right feature flags.
+  </Card>
+  <Card title="Core Concepts" icon="book-open" href="/concepts/queue">
+    Understand queues, messages, brokers, and retry strategies.
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/broccoli-queue">
+    Full API documentation for every public type and method.
+  </Card>
+</CardGroup>
+
+## Why Broccoli?
+
+If you're familiar with Python's Celery but want the performance and type safety of Rust, Broccoli is designed for you. It provides:
+
+<CardGroup cols={2}>
+  <Card title="Type-Safe Messages" icon="shield-check">
+    Generic `BrokerMessage<T>` ensures your payloads are fully typed and serialized with serde.
+  </Card>
+  <Card title="Multiple Backends" icon="database">
+    Switch between Redis, RabbitMQ, and SurrealDB by changing the connection URL — no API changes needed.
+  </Card>
+  <Card title="Configurable Retries" icon="rotate">
+    Built-in retry strategies move failed messages through processing → retry → failed queues automatically.
+  </Card>
+  <Card title="Fairness Queues" icon="scale-balanced">
+    Use disambiguators to distribute work evenly across tenants or job types without starving any group.
+  </Card>
+  <Card title="Message Scheduling" icon="calendar">
+    Delay messages or schedule them at a specific time using `PublishOptions`.
+  </Card>
+  <Card title="Connection Pooling" icon="server">
+    bb8 (Redis) and deadpool (RabbitMQ) pools keep connections alive and reused across workers.
+  </Card>
+</CardGroup>
+
+## Get Started
+
+<Steps>
+  <Step title="Add the dependency">
+    Add `broccoli_queue` to your `Cargo.toml` with the broker feature you need.
+    ```toml Cargo.toml
+    [dependencies]
+    broccoli_queue = { version = "0.4", features = ["redis"] }
+    ```
+  </Step>
+  <Step title="Build the queue">
+    Connect to your broker using the builder API.
+    ```rust
+    use broccoli_queue::queue::BroccoliQueue;
+
+    let queue = BroccoliQueue::builder("redis://localhost:6379")
+        .pool_connections(5)
+        .failed_message_retry_strategy(Default::default())
+        .build()
+        .await?;
+    ```
+  </Step>
+  <Step title="Publish a message">
+    Publish any `serde`-serializable type to a named topic.
+    ```rust
+    queue.publish("jobs", None, &my_payload, None).await?;
+    ```
+  </Step>
+  <Step title="Process messages">
+    Start a worker loop with `process_messages` and a typed async handler.
+    ```rust
+    queue.process_messages("jobs", Some(4), None, |msg| async move {
+        println!("Got job: {:?}", msg.payload);
+        Ok(())
+    }).await?;
+    ```
+  </Step>
+</Steps>
 
 <Tip>
-  Ready to make this your own? Start by editing this page. Update your `docs.json` file to customize your site. Then fill out the [Quickstart](/quickstart) page.
+  See the [Quickstart](/quickstart) for a complete working example, or dive into the [Broker Backends](/brokers/redis) section to learn about backend-specific configuration.
 </Tip>
-
-<Card title="Quickstart" icon="rocket" href="/quickstart">
-  This card links to the quickstart page in your project.
-</Card>
-<Card title="Components" icon="puzzle-piece" href="https://mintlify.com/docs/components">
-  Add cards, callouts, steps, tabs, and more to design and structure your pages.
-</Card>
-<Card title="Settings" icon="gear" href="https://mintlify.com/docs/organize/settings">
-  Set your site name, branding, and navigation in the `docs.json` file.
-</Card>

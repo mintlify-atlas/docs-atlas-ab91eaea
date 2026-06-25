@@ -1,0 +1,149 @@
+---
+title: "RabbitMQ Broker Setup for Broccoli Queue"
+sidebarTitle: "RabbitMQ"
+description: "Use RabbitMQ as a Broccoli broker via the rabbitmq feature: AMQP URLs, deadpool-lapin pooling, durable queues, and optional delayed-exchange scheduling."
+---
+
+Broccoli's RabbitMQ broker communicates over the AMQP protocol using the [`lapin`](https://crates.io/crates/lapin) client library, with [`deadpool-lapin`](https://crates.io/crates/deadpool-lapin) providing async connection pooling. It is not included in the default feature set and must be enabled via the `rabbitmq` Cargo feature. Messages are published to a durable `broccoli` exchange and consumed from per-topic durable queues, giving you RabbitMQ's built-in durability and routing semantics on top of Broccoli's unified API.
+
+## Installation
+
+<CodeGroup>
+```toml rabbitmq only
+# Cargo.toml
+[dependencies]
+broccoli_queue = { version = "0.4", features = ["rabbitmq"] }
+```
+
+```toml rabbitmq, no redis
+# Cargo.toml — disable the default redis feature when you don't need it
+[dependencies]
+broccoli_queue = { version = "0.4", default-features = false, features = ["rabbitmq"] }
+```
+</CodeGroup>
+
+## Running RabbitMQ
+
+<Steps>
+  <Step title="Start the broker">
+    The official `rabbitmq:3-management` image bundles both the broker and the web management UI:
+
+    ```bash
+    docker run -d --name rabbitmq \
+      -p 5672:5672 \
+      -p 15672:15672 \
+      rabbitmq:3-management
+    ```
+  </Step>
+  <Step title="Verify connectivity">
+    Open the management console at [http://localhost:15672](http://localhost:15672) and log in with the default credentials (`guest` / `guest`). You should see an empty *Queues* tab — Broccoli will create queues automatically on first use.
+  </Step>
+</Steps>
+
+## Connection URL Formats
+
+| URL | Description |
+|-----|-------------|
+| `amqp://guest:guest@localhost:5672` | Plain AMQP with default credentials |
+| `amqp://user:pass@host:5672/vhost` | Custom vhost |
+| `amqps://user:pass@host:5671` | TLS-encrypted AMQP (`amqps://` scheme) |
+
+## Connection Pool
+
+The RabbitMQ broker uses **deadpool-lapin** in FIFO mode. Pool parameters:
+
+- **Pool size** — `.pool_connections(n)`, default **10**.
+- **Wait / create / recycle timeout** — each capped at **2 seconds**.
+
+A new AMQP channel is created per operation (publish, consume, acknowledge, reject) from the pooled connection, matching lapin's recommended channel-per-operation pattern.
+
+## Full Example
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let queue = BroccoliQueue::builder("amqp://guest:guest@localhost:5672")
+        .pool_connections(5)
+        .failed_message_retry_strategy(Default::default())
+        .build()
+        .await?;
+
+    queue.publish("orders", None, &"order-42", None).await?;
+
+    let msg = queue.consume::<String>("orders", None).await?;
+    println!("Processing: {}", msg.payload);
+    queue.acknowledge("orders", msg).await?;
+
+    Ok(())
+}
+```
+
+## Scheduling with RabbitMQ
+
+<Warning>
+  Scheduling requires the **`rabbitmq_delayed_message_exchange`** plugin. Without it, `delay` and `scheduled_at` publish options are silently ignored even when `.enable_scheduling(true)` is set.
+</Warning>
+
+### Installing the Plugin
+
+<Tabs>
+  <Tab title="Existing container">
+    ```bash
+    rabbitmq-plugins enable rabbitmq_delayed_message_exchange
+    ```
+  </Tab>
+  <Tab title="Custom Docker image">
+    Broccoli ships a ready-to-use `Dockerfile.rabbitmq` that downloads the plugin and enables it at build time:
+
+    ```dockerfile
+    FROM rabbitmq:4.0.9-management
+
+    USER root
+    RUN apt-get update && apt-get install -y wget && rm -rf /var/lib/apt/lists/*
+
+    RUN wget https://github.com/rabbitmq/rabbitmq-delayed-message-exchange/releases/download/v4.0.7/rabbitmq_delayed_message_exchange-v4.0.7.ez \
+        -O /opt/rabbitmq/plugins/rabbitmq_delayed_message_exchange-v4.0.7.ez
+
+    RUN chown rabbitmq:rabbitmq /opt/rabbitmq/plugins/rabbitmq_delayed_message_exchange-v4.0.7.ez && \
+        chmod 644 /opt/rabbitmq/plugins/rabbitmq_delayed_message_exchange-v4.0.7.ez
+
+    RUN rabbitmq-plugins enable rabbitmq_delayed_message_exchange
+
+    USER rabbitmq
+    ```
+  </Tab>
+</Tabs>
+
+### Enabling Scheduling in the Builder
+
+```rust
+let queue = BroccoliQueue::builder("amqp://guest:guest@localhost:5672")
+    .enable_scheduling(true)
+    .build()
+    .await?;
+```
+
+With scheduling enabled, the broker sets an `x-delay` AMQP header (in milliseconds) when a `delay` or `scheduled_at` is provided in `PublishOptions`. The delayed-exchange plugin holds the message until the delay elapses before routing it to the target queue.
+
+## Queue and Exchange Naming
+
+When the broker first connects it declares a single durable **direct exchange** named `broccoli`. Each topic you publish to causes an **idempotent declaration** of a durable queue with that exact name, bound to the `broccoli` exchange using the topic name as the routing key. You do not need to pre-declare queues — Broccoli handles this automatically on every publish and consume call.
+
+<Note>
+  The `cancel` and `size` operations are not implemented for RabbitMQ and return `BroccoliError::NotImplemented`. If you need these operations, use the Redis broker or enable the `management` feature (see below).
+</Note>
+
+## Queue Status via Management Feature
+
+When the `management` Cargo feature is enabled alongside `rabbitmq`, the `queue_status()` API becomes available. It reports the number of ready messages per queue using RabbitMQ's management interface.
+
+```toml
+broccoli_queue = { version = "0.4", features = ["rabbitmq", "management"] }
+```
+
+```rust
+let status = queue.queue_status("orders").await?;
+println!("{status:?}");
+```

@@ -1,0 +1,140 @@
+---
+title: "Redis Broker: Default Backend for Broccoli Queue"
+sidebarTitle: "Redis"
+description: "Redis is Broccoli's default broker: sorted sets for scheduling, bb8 pooling, and dedicated lists for processing, failed messages, and fairness queues."
+---
+
+Redis is the default and most mature broker backend in Broccoli Queue. It stores messages in Redis sorted sets, using Unix nanosecond timestamps as scores to enforce ordering and enable future-scheduled delivery. Separate Redis lists track in-flight (processing) and permanently-failed messages, giving you a clear view of every message's lifecycle. Because Redis is enabled out of the box, no extra feature flags are required for most projects.
+
+## Installation
+
+The `redis` feature is part of Broccoli's default feature set, so a plain version specifier is enough. You can also declare it explicitly if your project disables default features.
+
+<CodeGroup>
+```toml Default (implicit)
+# Cargo.toml
+[dependencies]
+broccoli_queue = "0.4"
+```
+
+```toml Explicit feature
+# Cargo.toml
+[dependencies]
+broccoli_queue = { version = "0.4", features = ["redis"] }
+```
+</CodeGroup>
+
+## Starting Redis
+
+The quickest way to get a local Redis instance running is with Docker:
+
+```bash
+docker run -d -p 6379:6379 redis
+```
+
+Redis will be available on `localhost:6379` with no authentication by default.
+
+## Connection URL Formats
+
+Pass the broker URL to `BroccoliQueue::builder`. The Redis client supports plain TCP, authenticated, and TLS connections.
+
+| URL | Description |
+|-----|-------------|
+| `redis://localhost:6379` | Standard unauthenticated connection |
+| `redis://:password@localhost:6379` | Password-protected instance |
+| `rediss://localhost:6380` | TLS-encrypted connection (`rediss://` scheme) |
+
+## Connection Pool
+
+The Redis broker is backed by **[bb8-redis](https://crates.io/crates/bb8-redis)**, a `bb8`-powered async connection pool. Pool behaviour is configured on the builder:
+
+- **Pool size** — set via `.pool_connections(n)`; defaults to **10** connections.
+- **Connection timeout** — fixed at **2 seconds**; if a checkout exceeds this limit, the pool attempts to rebuild.
+- **Automatic recovery** — if a checkout fails, the broker rebuilds the pool with exponential backoff (starting at 1 s, capped at 5 min) and retries transparently.
+
+```rust
+BroccoliQueue::builder("redis://localhost:6379")
+    .pool_connections(10) // default is 10
+    // ...
+```
+
+## Queue Data Structures
+
+Broccoli maps its logical queue model onto three categories of Redis key, all derived from the topic name you pass to `publish` / `consume`.
+
+<CardGroup cols={2}>
+  <Card title="Main Queue" icon="list-ol">
+    **Key:** `{topic}`
+
+    A Redis **sorted set**. Messages are added with `ZADD` using `priority × unix_nanoseconds` as the score so lower-priority numbers (1 = highest) and earlier timestamps surface first. Messages are popped with `ZPOPMIN`.
+  </Card>
+  <Card title="Processing Queue" icon="arrow-right-arrow-left">
+    **Key:** `{topic}_processing`
+
+    A Redis **list**. When a consumer pops a message it is immediately pushed here with `LPUSH`, providing at-least-once delivery. On `acknowledge` the entry is removed with `LREM`.
+  </Card>
+  <Card title="Failed Queue" icon="circle-exclamation">
+    **Key:** `{topic}_failed`
+
+    A Redis **list**. Messages that exhaust all retry attempts land here via `LPUSH` for later inspection or replay.
+  </Card>
+  <Card title="Fairness Keys" icon="scale-balanced">
+    **Keys:** `{topic}_{disambiguator}_queue`, `{topic}_{disambiguator}_processing`
+
+    Per-disambiguator sorted sets and processing lists. A `{topic}_fairness_round_robin` list and `{topic}_fairness_set` set coordinate round-robin scheduling across all active disambiguators.
+  </Card>
+</CardGroup>
+
+Each message's fields (task ID, payload, attempt count, priority, optional disambiguator) are stored in a separate Redis **hash** keyed by `task_id`. The sorted set and processing list hold only the `task_id`; the full payload is fetched with `HGETALL` after popping.
+
+## Priority
+
+Broccoli supports five priority levels (1 – 5, where **1 is highest**). Internally the score stored in the sorted set is `priority × unix_nanoseconds`. A priority-1 message therefore always has a numerically smaller score than a priority-5 message created at the same instant, so `ZPOPMIN` naturally dequeues higher-priority messages first.
+
+<Note>
+  Priority must be an integer between 1 and 5. Values outside that range cause a `BroccoliError::Broker` at publish time.
+</Note>
+
+## Scheduling
+
+When `.enable_scheduling(true)` is set on the builder, the broker honours the `delay` and `scheduled_at` fields in `PublishOptions`:
+
+- **`delay`** — adds the duration (in nanoseconds) to the current timestamp before storing the score.
+- **`scheduled_at`** — stores the target timestamp's nanoseconds directly as the score.
+
+At consume time a Lua script compares each candidate score against `5 × current_time`. If `score > 5 × now`, the message has not yet reached its scheduled instant and is re-inserted into the sorted set unchanged.
+
+<Warning>
+  If `.enable_scheduling(false)` (the default), `delay` and `scheduled_at` in `PublishOptions` are silently ignored. Enable scheduling explicitly when you need delayed or time-based delivery.
+</Warning>
+
+## Full Example
+
+```rust
+use broccoli_queue::queue::BroccoliQueue;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let queue = BroccoliQueue::builder("redis://localhost:6379")
+        .pool_connections(10)
+        .failed_message_retry_strategy(Default::default())
+        .enable_scheduling(false)
+        .build()
+        .await?;
+
+    // Publish a message
+    queue.publish("jobs", None, &"hello world", None).await?;
+
+    // Consume it (non-blocking)
+    if let Some(msg) = queue.try_consume::<String>("jobs", None).await? {
+        println!("Got: {}", msg.payload);
+        queue.acknowledge("jobs", msg).await?;
+    }
+
+    Ok(())
+}
+```
+
+<Tip>
+  Use `.try_consume` for non-blocking polling and `.consume` for a blocking loop that suspends the task until a message arrives (polls every 500 ms by default).
+</Tip>

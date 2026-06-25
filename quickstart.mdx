@@ -1,47 +1,357 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with Broccoli Queue in Minutes"
+sidebarTitle: "Quickstart"
+description: "Build a working Rust producer and consumer with Redis in under five minutes — publish typed jobs, process them concurrently, and handle retries automatically."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
+In this guide you will build two small Rust programs: a **producer** that publishes typed job messages to a Redis-backed queue, and a **consumer** that pulls those messages off the queue and processes them concurrently. By the end you will have a fully functional async message queue pipeline running locally, using real code drawn straight from Broccoli's example suite.
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
+<Note>
+  **Prerequisites**
 
-## Prerequisites
+  - A Rust toolchain installed ([rustup.rs](https://rustup.rs)) — Broccoli requires Rust edition 2021, so any recent stable release works.
+  - A running Redis instance. The examples connect to `redis://localhost:6379`. Start one instantly with Docker:
+    ```bash
+    docker run -p 6379:6379 redis
+    ```
+</Note>
 
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+## Step-by-Step Setup
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+  <Step title="Add Dependencies">
+    Create a new binary crate (or open an existing one) and add the following to your `Cargo.toml`:
 
-    ```bash
-    npm install your-package
+    ```toml Cargo.toml
+    [dependencies]
+    broccoli_queue = { version = "0.4", features = ["redis"] }
+    tokio            = { version = "1",   features = ["full"] }
+    serde            = { version = "1",   features = ["derive"] }
+    chrono           = { version = "0.4", features = ["serde"] }
     ```
+
+    The `redis` feature is the default, so you may also write `broccoli_queue = "0.4"` and get the same result. Additional broker features (`rabbitmq`, `surrealdb`) can be added later — see the [Installation](/installation) page.
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
 
-    ```bash
-    your-cli init
+  <Step title="Define Your Message Type">
+    Broccoli wraps any `Serialize + DeserializeOwned` type. Define a plain Rust struct for your job payload:
+
+    ```rust
+    use serde::{Deserialize, Serialize};
+    use chrono::{DateTime, Utc};
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct JobPayload {
+        id: String,
+        task_name: String,
+        parameters: Parameters,
+        created_at: DateTime<Utc>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct Parameters {
+        input_data: String,
+        priority: u8,
+        timeout_seconds: u32,
+    }
     ```
+
+    Broccoli will serialise this struct to JSON automatically when publishing and deserialise it back when consuming.
   </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
 
-    ```bash
-    your-cli start
+  <Step title="Create the Queue">
+    Use the builder API to configure and connect to your broker. Call `.build().await` to establish the connection pool:
+
+    ```rust
+    use broccoli_queue::queue::BroccoliQueue;
+
+    let queue = BroccoliQueue::builder("redis://localhost:6379")
+        .pool_connections(5)                              // pre-warm 5 connections
+        .failed_message_retry_strategy(Default::default()) // retry failed msgs up to 3×
+        .build()
+        .await?;
     ```
+
+    The builder is infallible until `.build()` — all configuration calls take `self` and return `self`, so they chain cleanly.
+  </Step>
+
+  <Step title="Publish a Message">
+    Publish a single message or a batch. Both methods return the published `BrokerMessage<T>` (with the auto-assigned `task_id` UUID) so you can track jobs if needed.
+
+    <CodeGroup>
+      ```rust Single message
+      use broccoli_queue::queue::PublishOptions;
+      use time::Duration;
+
+      // Publish immediately
+      let published = queue
+          .publish("jobs", None, &job, None)
+          .await?;
+
+      println!("Published: {}", published.task_id);
+      ```
+
+      ```rust Batch publish
+      use broccoli_queue::queue::PublishOptions;
+      use time::Duration;
+
+      // Publish a batch with a 10-second delivery delay
+      let published = queue
+          .publish_batch(
+              "jobs",
+              None,          // disambiguator (for fairness queues)
+              jobs,          // anything that implements IntoIterator<Item = T>
+              Some(PublishOptions {
+                  delay: Some(Duration::seconds(10)),
+                  scheduled_at: None,
+                  ttl: None,
+                  priority: None,
+              }),
+          )
+          .await?;
+
+      println!(
+          "Published {} jobs",
+          published.len()
+      );
+      ```
+    </CodeGroup>
+
+    Pass `None` as the last argument to `publish` / `publish_batch` to use default options (no TTL, no delay, no priority).
+  </Step>
+
+  <Step title="Consume and Process Messages">
+    `process_messages` is the high-level processing loop. It blocks indefinitely, pulling messages from the queue and dispatching each one to your async handler. Pass a concurrency value to run multiple parallel worker tasks:
+
+    ```rust
+    use broccoli_queue::brokers::broker::BrokerMessage;
+
+    queue
+        .process_messages(
+            "jobs",    // topic / queue name
+            Some(4),   // spawn 4 concurrent worker tasks
+            None,      // default ConsumeOptions
+            |msg: BrokerMessage<JobPayload>| async move {
+                println!(
+                    "Processing job {} ({})",
+                    msg.payload.id,
+                    msg.payload.task_name
+                );
+                // do real work here…
+                Ok(())
+            },
+        )
+        .await?;
+    ```
+
+    On `Ok(())` Broccoli automatically acknowledges the message, removing it from the queue. On `Err(...)` it rejects the message and (if your retry strategy permits) re-enqueues it for another attempt.
+
+    <Tip>
+      Need custom success and error callbacks? Use `process_messages_with_handlers` instead — it accepts separate `on_success` and `on_error` async functions alongside the main message handler.
+    </Tip>
   </Step>
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## Complete Producer Example
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+The following is derived directly from [`examples/publisher.rs`](https://github.com/densumesh/broccoli/blob/main/examples/publisher.rs). It publishes two batches: one with a 10-second delay and one immediately.
+
+```rust producer/src/main.rs
+use broccoli_queue::{
+    error::BroccoliError,
+    queue::{BroccoliQueue, PublishOptions},
+};
+use serde::{Deserialize, Serialize};
+use time::Duration;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JobPayload {
+    id: String,
+    task_name: String,
+    parameters: Parameters,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Parameters {
+    input_data: String,
+    priority: u8,
+    timeout_seconds: u32,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), BroccoliError> {
+    let queue = BroccoliQueue::builder("redis://localhost:6379")
+        .failed_message_retry_strategy(Default::default())
+        .pool_connections(5)
+        .build()
+        .await?;
+
+    // -- Batch 1: scheduled with a 10-second delay --
+    let scheduled_jobs = vec![
+        JobPayload {
+            id: "job-1".to_string(),
+            task_name: "process_data".to_string(),
+            parameters: Parameters {
+                input_data: "data-1".to_string(),
+                priority: 1,
+                timeout_seconds: 300,
+            },
+            created_at: chrono::Utc::now(),
+        },
+        JobPayload {
+            id: "job-2".to_string(),
+            task_name: "generate_report".to_string(),
+            parameters: Parameters {
+                input_data: "data-2".to_string(),
+                priority: 2,
+                timeout_seconds: 600,
+            },
+            created_at: chrono::Utc::now(),
+        },
+    ];
+
+    println!("Publishing delayed jobs...");
+    let published = queue
+        .publish_batch(
+            "jobs",
+            None,
+            scheduled_jobs,
+            Some(PublishOptions {
+                delay: Some(Duration::seconds(10)),
+                scheduled_at: None,
+                ttl: None,
+                priority: None,
+            }),
+        )
+        .await?;
+
+    println!(
+        "Published scheduled jobs: {:?}",
+        published.iter().map(|j| j.task_id).collect::<Vec<_>>()
+    );
+
+    // -- Batch 2: immediate delivery --
+    let immediate_jobs = vec![
+        JobPayload {
+            id: "job-3".to_string(),
+            task_name: "process_data".to_string(),
+            parameters: Parameters {
+                input_data: "data-3".to_string(),
+                priority: 1,
+                timeout_seconds: 300,
+            },
+            created_at: chrono::Utc::now(),
+        },
+        JobPayload {
+            id: "job-4".to_string(),
+            task_name: "generate_report".to_string(),
+            parameters: Parameters {
+                input_data: "data-4".to_string(),
+                priority: 2,
+                timeout_seconds: 600,
+            },
+            created_at: chrono::Utc::now(),
+        },
+    ];
+
+    println!("Publishing immediate jobs...");
+    let published = queue
+        .publish_batch("jobs", None, immediate_jobs, None)
+        .await?;
+
+    println!(
+        "Published immediate jobs: {:?}",
+        published.iter().map(|j| j.task_id).collect::<Vec<_>>()
+    );
+
+    Ok(())
+}
+```
+
+## Complete Consumer Example
+
+The following is derived from [`examples/consumer.rs`](https://github.com/densumesh/broccoli/blob/main/examples/consumer.rs). It runs 4 concurrent workers and also demonstrates `process_messages_with_handlers` for separate success and error callbacks.
+
+```rust consumer/src/main.rs
+use broccoli_queue::{error::BroccoliError, queue::BroccoliQueue};
+use serde::{Deserialize, Serialize};
+use std::{error::Error, time::Duration};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JobPayload {
+    id: String,
+    task_name: String,
+    parameters: Parameters,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Parameters {
+    input_data: String,
+    priority: u8,
+    timeout_seconds: u32,
+}
+
+async fn process_job(job: JobPayload) -> Result<(), BroccoliError> {
+    println!("Processing job: {} ({})", job.id, job.task_name);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    Ok(())
+}
+
+async fn success_handler(msg: JobPayload) -> Result<(), BroccoliError> {
+    println!("Successfully processed message: {msg:?}");
+    Ok(())
+}
+
+async fn error_handler(msg: JobPayload, err: BroccoliError) -> Result<(), BroccoliError> {
+    eprintln!("Failed to process message: {}. Error: {}", msg.id, err);
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    env_logger::init();
+
+    let queue = BroccoliQueue::builder("redis://localhost:6379")
+        .pool_connections(5)
+        .failed_message_retry_strategy(Default::default())
+        .build()
+        .await?;
+
+    // Simple handler — 4 concurrent workers
+    queue
+        .process_messages("jobs", Some(4), None, |msg| async move {
+            process_job(msg.payload).await
+        })
+        .await
+        .unwrap();
+
+    // Advanced handler with separate success / error callbacks
+    queue
+        .process_messages_with_handlers(
+            "jobs",
+            Some(5),
+            None,
+            |msg| async move { process_job(msg.payload).await },
+            |msg, _result| async { success_handler(msg.payload).await },
+            |msg, err| async { error_handler(msg.payload, err).await },
+        )
+        .await?;
+
+    println!("Consumer shutdown complete");
+    Ok(())
+}
+```
+
+<Tip>
+  **Switching broker backends is a one-line change.** Replace the URL and the Cargo feature flag:
+
+  | Backend | URL prefix | Feature flag |
+  |---|---|---|
+  | Redis | `redis://` | `features = ["redis"]` |
+  | RabbitMQ | `amqp://` | `features = ["rabbitmq"]` |
+  | SurrealDB | `ws://` | `features = ["surrealdb"]` |
+
+  For example, to use RabbitMQ on its default port: `BroccoliQueue::builder("amqp://localhost:5672")` — no other application code needs to change.
 </Tip>
