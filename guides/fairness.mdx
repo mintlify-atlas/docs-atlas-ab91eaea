@@ -69,17 +69,17 @@ Knowing the exact key names is important for manual acknowledge/reject calls and
 | All disambiguators | `{topic}_fairness_set` |
 | Round-robin cursor | `{topic}_fairness_round_robin` |
 
-When calling `acknowledge` or `reject` after a manual consume from a fairness sub-queue, you must pass the full sub-queue name as the `topic` argument:
+When calling `acknowledge` or `reject` after a manual consume from a fairness queue, pass the **root topic name** — the broker reads the `disambiguator` stored on the message and resolves the correct processing sub-queue automatically:
 
 ```rust
-// Message was consumed from the "tenant-a" sub-queue
+// Pass the root topic name; the broker derives the sub-queue from msg.disambiguator
 queue
-    .acknowledge("jobs_tenant-a_queue", msg)
+    .acknowledge("jobs", msg)
     .await?;
 ```
 
 <Note>
-When using `process_messages` with `fairness: true`, Broccoli handles the sub-queue name internally — you only need to pass the root topic name (`"jobs"`). The sub-queue name matters only for manual low-level consume flows.
+This applies to both `process_messages` and manual low-level consume flows. You always pass the root topic name (`"jobs"`); Broccoli uses the `disambiguator` field on the `BrokerMessage` to locate the correct per-producer processing queue.
 </Note>
 
 ## Backend support
@@ -96,16 +96,16 @@ broccoli_queue = { version = "0.4", features = ["redis", "test-fairness"] }
 ## Use cases
 
 <CardGroup cols={2}>
-  <Card title="Multi-tenant SaaS" icon="building">
+  <Card title="Multi-tenant SaaS" icon="building" href="/guides/publishing">
     Route each customer's jobs to their own sub-queue so a single large customer cannot delay processing for all other tenants.
   </Card>
-  <Card title="Per-user job isolation" icon="user">
+  <Card title="Per-user job isolation" icon="user" href="/guides/consuming">
     Assign one sub-queue per user so every user's background tasks receive equal attention regardless of how many tasks they submit.
   </Card>
-  <Card title="Priority producers" icon="arrow-up">
+  <Card title="Priority producers" icon="arrow-up" href="/guides/publishing">
     Combine disambiguators with `PublishOptions::priority` to give individual producers both fairness across producers and message-level priority within their own sub-queue.
   </Card>
-  <Card title="Rate limiting per source" icon="gauge">
+  <Card title="Rate limiting per source" icon="gauge" href="/guides/management">
     Implement token-bucket or leaky-bucket rate limits upstream of publish, then use fairness on the consume side to guarantee fair drain order between sources.
   </Card>
 </CardGroup>

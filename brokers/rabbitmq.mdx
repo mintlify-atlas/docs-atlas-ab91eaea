@@ -4,7 +4,7 @@ sidebarTitle: "RabbitMQ"
 description: "Use RabbitMQ as a Broccoli broker via the rabbitmq feature: AMQP URLs, deadpool-lapin pooling, durable queues, and optional delayed-exchange scheduling."
 ---
 
-Broccoli's RabbitMQ broker communicates over the AMQP protocol using the [`lapin`](https://crates.io/crates/lapin) client library, with [`deadpool-lapin`](https://crates.io/crates/deadpool-lapin) providing async connection pooling. It is not included in the default feature set and must be enabled via the `rabbitmq` Cargo feature. Messages are published to a durable `broccoli` exchange and consumed from per-topic durable queues, giving you RabbitMQ's built-in durability and routing semantics on top of Broccoli's unified API.
+Broccoli's RabbitMQ broker communicates over the AMQP protocol using the [`lapin`](https://crates.io/crates/lapin) client library, with [`deadpool-lapin`](https://crates.io/crates/deadpool-lapin) providing async connection pooling. It is not included in the default feature set and must be enabled via the `rabbitmq` Cargo feature. Messages are published to a `broccoli` exchange and consumed from per-topic durable queues, giving you RabbitMQ's built-in durability and routing semantics on top of Broccoli's unified API.
 
 ## Installation
 
@@ -129,7 +129,7 @@ With scheduling enabled, the broker sets an `x-delay` AMQP header (in millisecon
 
 ## Queue and Exchange Naming
 
-When the broker first connects it declares a single durable **direct exchange** named `broccoli`. Each topic you publish to causes an **idempotent declaration** of a durable queue with that exact name, bound to the `broccoli` exchange using the topic name as the routing key. You do not need to pre-declare queues — Broccoli handles this automatically on every publish and consume call.
+When the broker first connects it declares a **direct exchange** named `broccoli` (or an `x-delayed-message` exchange when scheduling is enabled). Each topic you publish to causes an **idempotent declaration** of a durable queue with that exact name, bound to the `broccoli` exchange using the topic name as the routing key. You do not need to pre-declare queues — Broccoli handles this automatically on every publish and consume call.
 
 <Note>
   The `cancel` and `size` operations are not implemented for RabbitMQ and return `BroccoliError::NotImplemented`. If you need these operations, use the Redis broker or enable the `management` feature (see below).
@@ -137,13 +137,13 @@ When the broker first connects it declares a single durable **direct exchange** 
 
 ## Queue Status via Management Feature
 
-When the `management` Cargo feature is enabled alongside `rabbitmq`, the `queue_status()` API becomes available. It reports the number of ready messages per queue using RabbitMQ's management interface.
+When the `management` Cargo feature is enabled alongside `rabbitmq`, the `queue_status()` API becomes available via `BroccoliQueue::queue_status`.
 
 ```toml
 broccoli_queue = { version = "0.4", features = ["rabbitmq", "management"] }
 ```
 
 ```rust
-let status = queue.queue_status("orders").await?;
+let status = queue.queue_status("orders".to_string(), None).await?;
 println!("{status:?}");
 ```

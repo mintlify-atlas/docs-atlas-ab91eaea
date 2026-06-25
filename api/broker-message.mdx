@@ -108,10 +108,10 @@ tracing::warn!(task_id = %task_id, "message rejected");
 
 ## QueueStatus
 
-`QueueStatus` is returned by `queue.get_queue_status(queue_name, disambiguator)` and provides a snapshot of queue depth at a given moment in time.
+`QueueStatus` is returned by `queue.queue_status(queue_name, disambiguator)` and provides a snapshot of queue depth at a given moment in time.
 
 <Note>
-  `QueueStatus`, `QueueType`, and the `get_queue_status` method require the `management` Cargo feature. Enable it in your `Cargo.toml`:
+  `QueueStatus`, `QueueType`, and the `queue_status` method require the `management` Cargo feature. Enable it in your `Cargo.toml`:
 
   ```toml
   broccoli_queue = { version = "*", features = ["management"] }
@@ -121,7 +121,7 @@ tracing::warn!(task_id = %task_id, "message rejected");
 ### QueueStatus Fields
 
 <ResponseField name="name" type="String" required>
-  The name of the queue as passed to `get_queue_status`.
+  The name of the queue as passed to `queue_status`.
 </ResponseField>
 
 <ResponseField name="queue_type" type="QueueType" required>
@@ -158,7 +158,7 @@ tracing::warn!(task_id = %task_id, "message rejected");
 ```rust
 use broccoli_queue::brokers::management::{QueueStatus, QueueType};
 
-let status = queue.get_queue_status("jobs".to_string(), None).await?;
+let status = queue.queue_status("jobs".to_string(), None).await?;
 println!(
     "Queue '{}' ({}) — waiting: {}, processing: {}, failed: {}",
     status.name, status.queue_type, status.size, status.processing, status.failed

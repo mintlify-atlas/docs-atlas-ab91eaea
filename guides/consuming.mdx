@@ -166,7 +166,7 @@ queue.reject("jobs", msg).await?;
 If you consumed a message with `auto_ack: true`, calling `acknowledge` or `reject` afterwards will return an error because the broker already disposed of the processing-queue entry. Only call these methods after a standard (non-auto-ack) consume.
 </Warning>
 
-For fairness queues you must pass the full sub-queue name as the `topic` argument to `acknowledge` and `reject`. See the [Fairness Queues guide](/guides/fairness) for naming details.
+When consuming from a fairness queue, pass the root topic name to `acknowledge` and `reject` — the broker reads the `disambiguator` stored on the message and resolves the correct processing sub-queue automatically. See the [Fairness Queues guide](/guides/fairness) for details.
 
 ## ConsumeOptions
 

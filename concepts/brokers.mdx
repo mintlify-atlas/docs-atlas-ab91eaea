@@ -72,6 +72,15 @@ pub trait Broker: Send + Sync {
         options: Option<ConsumeOptions>,
     ) -> Result<Option<InternalBrokerMessage>, BroccoliError>;
 
+    // Default implementation calls try_consume in a loop up to batch_size times.
+    // Override for backends that support a more efficient native batch read.
+    async fn try_consume_batch(
+        &self,
+        queue_name: &str,
+        batch_size: usize,
+        options: Option<ConsumeOptions>,
+    ) -> Result<Vec<InternalBrokerMessage>, BroccoliError>;
+
     async fn acknowledge(
         &self,
         queue_name: &str,
@@ -97,7 +106,7 @@ pub trait Broker: Send + Sync {
 }
 ```
 
-`try_consume_batch` also has a default implementation built on top of `try_consume`, so individual brokers only need to override it if the backend supports a more efficient batch read primitive.
+The `try_consume_batch` method has a default implementation in the trait that calls `try_consume` in a loop up to `batch_size` times, returning immediately without blocking. Individual brokers can override it if the backend supports a more efficient native batch read primitive.
 
 ## BrokerConfig
 

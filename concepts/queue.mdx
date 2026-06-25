@@ -4,7 +4,7 @@ sidebarTitle: "Queue"
 description: "BroccoliQueue is Broccoli's central API struct. It wraps a broker behind an Arc<Box<dyn Broker>>, making it cheaply cloneable across async tasks."
 ---
 
-`BroccoliQueue` is the central struct in Broccoli. It wraps a broker implementation behind an `Arc<Box<dyn Broker>>` so it can be cheaply cloned and shared across async tasks without duplicating connection pool resources. Every interaction with a queue — publishing, consuming, acknowledging, or inspecting — goes through this single type.
+`BroccoliQueue` is the central struct in Broccoli. It wraps a broker implementation behind an `Arc<Box<dyn Broker>>` (or `Arc<Box<dyn BrokerWithManagement>>` when the `management` feature is enabled) so it can be cheaply cloned and shared across async tasks without duplicating connection pool resources. Every interaction with a queue — publishing, consuming, acknowledging, or inspecting — goes through this single type.
 
 ## Builder Pattern
 
@@ -12,7 +12,7 @@ description: "BroccoliQueue is Broccoli's central API struct. It wraps a broker 
 
 ```rust
 let queue = BroccoliQueue::builder("redis://localhost:6379")
-    .pool_connections(5)
+    .pool_connections(10)
     .failed_message_retry_strategy(RetryStrategy::new().with_attempts(3))
     .enable_scheduling(false)
     .build()
@@ -30,6 +30,10 @@ The builder exposes these configuration methods:
 | `.pool_connections(n)` | Size of the broker connection pool | `10` |
 | `.failed_message_retry_strategy(s)` | Controls retry behaviour on handler errors | 3 attempts, retry enabled |
 | `.enable_scheduling(bool)` | Enables delayed/scheduled message publishing | `false` |
+
+<Note>
+  If you already have an open `surrealdb::Surreal` connection you want to reuse, use `BroccoliQueue::builder_with(db)` instead of `BroccoliQueue::builder(url)`. This constructor is only available when the `surrealdb` Cargo feature is enabled.
+</Note>
 
 ## Cloning
 

@@ -137,4 +137,4 @@ async fn test_my_queue() {
 
 ## Feature Limitations
 
-The SurrealDB broker does not implement `size()` or `cancel()` via message ID from the public queue — these return `BroccoliError::NotImplemented`. Message TTL via `PublishOptions::ttl` is also not supported and returns the same error. Scheduling (`delay` / `scheduled_at`) is fully supported when `.enable_scheduling(true)` is set.
+The SurrealDB broker does not implement `size()` — this returns `BroccoliError::NotImplemented`. `cancel()` is fully supported and removes a message by its task ID. Message TTL via `PublishOptions::ttl` is also not supported and returns `BroccoliError::NotImplemented`. Scheduling (`delay` / `scheduled_at`) is fully supported when `.enable_scheduling(true)` is set.

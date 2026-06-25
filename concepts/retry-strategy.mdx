@@ -109,7 +109,7 @@ You can read from the failed queue manually using the same `consume` or `try_con
 
 ```rust
 // Drain the failed queue and republish messages for re-processing
-while let Ok(Some(msg)) = queue.try_consume::<JobPayload>("jobs_failed", None).await? {
+while let Ok(Some(msg)) = queue.try_consume::<JobPayload>("jobs_failed", None).await {
     println!("Reprocessing failed job: {}", msg.task_id);
     queue.publish("jobs", None, &msg.payload, None).await?;
 }

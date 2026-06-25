@@ -30,7 +30,7 @@ Creates a new builder targeting the given broker URL. Equivalent to calling `Bro
 ### `.pool_connections`
 
 ```rust
-pub const fn pool_connections(self, connections: u8) -> Self
+pub const fn pool_connections(mut self, connections: u8) -> Self
 ```
 
 <ParamField path="connections" type="u8" required>
@@ -43,7 +43,7 @@ pub const fn pool_connections(self, connections: u8) -> Self
 ### `.failed_message_retry_strategy`
 
 ```rust
-pub const fn failed_message_retry_strategy(self, strategy: RetryStrategy) -> Self
+pub const fn failed_message_retry_strategy(mut self, strategy: RetryStrategy) -> Self
 ```
 
 <ParamField path="strategy" type="RetryStrategy" required>
@@ -57,7 +57,7 @@ pub const fn failed_message_retry_strategy(self, strategy: RetryStrategy) -> Sel
 ### `.enable_scheduling`
 
 ```rust
-pub const fn enable_scheduling(self, enable_scheduling: bool) -> Self
+pub const fn enable_scheduling(mut self, enable_scheduling: bool) -> Self
 ```
 
 <ParamField path="enable_scheduling" type="bool" required>
